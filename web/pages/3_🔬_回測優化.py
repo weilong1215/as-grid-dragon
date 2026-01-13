@@ -334,7 +334,7 @@ def run_optimization(manager: BacktestManager, symbol: str, ccxt_symbol: str,
         results = manager.optimize_params(sym_config, df, update_progress)
         progress_bar.progress(1.0, text="優化完成!")
         
-        return results, None
+        return results, None, None
 
 
 def run_smart_optimization(df: pd.DataFrame, sym_config: SymbolConfig, 
@@ -400,10 +400,11 @@ def run_smart_optimization(df: pd.DataFrame, sym_config: SymbolConfig,
     # 按收益率排序
     results.sort(key=lambda x: x["return_pct"], reverse=True)
     
-    return results, result
+    # 返回結果、SmartOptimizationResult 和 optimizer（用於獲取 study）
+    return results, result, optimizer
 
 
-def render_optimization_results(results: list, symbol: str, smart_result=None):
+def render_optimization_results(results: list, symbol: str, smart_result=None, optimizer=None):
     """渲染優化結果"""
     st.subheader("🏆 優化結果 (Top 10)")
 
@@ -463,6 +464,10 @@ def render_optimization_results(results: list, symbol: str, smart_result=None):
         fig.update_layout(height=200, margin=dict(l=0, r=0, t=10, b=0))
         st.plotly_chart(fig, use_container_width=True)
 
+    # 智能優化進階視覺化（需要 optimizer 對象）
+    if optimizer is not None and SMART_OPTIMIZER_AVAILABLE:
+        render_advanced_visualizations(optimizer, smart_result)
+
     # 應用最佳參數
     if results:
         best = results[0]
@@ -491,6 +496,290 @@ def render_optimization_results(results: list, symbol: str, smart_result=None):
 
                 st.success("已套用最佳參數!")
                 st.rerun()
+
+
+def render_advanced_visualizations(optimizer, smart_result):
+    """渲染進階優化視覺化圖表"""
+    import plotly.express as px
+    import plotly.graph_objects as go
+    
+    st.divider()
+    st.markdown("### 📈 進階優化分析")
+    
+    # 獲取 Optuna study 對象
+    study = optimizer.get_study()
+    if study is None:
+        st.warning("無法獲取優化歷史數據")
+        return
+    
+    # 使用 tabs 組織不同的視覺化
+    tab1, tab2, tab3 = st.tabs(["🔥 參數熱力圖", "📉 收斂曲線", "📊 平行座標圖"])
+    
+    with tab1:
+        render_contour_plot(study, smart_result)
+    
+    with tab2:
+        render_optimization_history(study, smart_result)
+    
+    with tab3:
+        render_parallel_coordinate(study, smart_result)
+
+
+def render_contour_plot(study, smart_result):
+    """渲染參數熱力圖 (Contour Plot)"""
+    import plotly.graph_objects as go
+    import numpy as np
+    
+    st.markdown("**參數空間熱力圖**")
+    st.caption("顯示兩個參數組合對目標值的影響。寬廣的高值區域表示參數穩健，小範圍高峰可能過擬合。")
+    
+    try:
+        # 從所有試驗中提取數據
+        trials_data = []
+        for trial in study.trials:
+            if trial.state.name == "COMPLETE":
+                trials_data.append({
+                    "take_profit": trial.params.get("take_profit_spacing", 0) * 100,
+                    "grid_spacing": trial.params.get("grid_spacing", 0) * 100,
+                    "objective": trial.value
+                })
+        
+        if len(trials_data) < 10:
+            st.info("試驗數據不足，無法生成熱力圖 (需要至少 10 個完成的試驗)")
+            return
+        
+        # 轉換為數組
+        tp_values = [d["take_profit"] for d in trials_data]
+        gs_values = [d["grid_spacing"] for d in trials_data]
+        obj_values = [d["objective"] for d in trials_data]
+        
+        # 創建熱力圖
+        fig = go.Figure(data=go.Scatter(
+            x=tp_values,
+            y=gs_values,
+            mode='markers',
+            marker=dict(
+                size=10,
+                color=obj_values,
+                colorscale='RdYlGn',
+                showscale=True,
+                colorbar=dict(title="目標值")
+            ),
+            text=[f"目標: {v:.4f}" for v in obj_values],
+            hovertemplate="止盈: %{x:.2f}%<br>補倉: %{y:.2f}%<br>%{text}<extra></extra>"
+        ))
+        
+        # 標記最佳點
+        best_tp = smart_result.best_params.get("take_profit_spacing", 0) * 100
+        best_gs = smart_result.best_params.get("grid_spacing", 0) * 100
+        
+        fig.add_trace(go.Scatter(
+            x=[best_tp],
+            y=[best_gs],
+            mode='markers',
+            marker=dict(size=20, color='gold', symbol='star', line=dict(color='black', width=2)),
+            name='最佳參數',
+            hovertemplate=f"最佳參數<br>止盈: {best_tp:.2f}%<br>補倉: {best_gs:.2f}%<extra></extra>"
+        ))
+        
+        fig.update_layout(
+            xaxis_title="止盈間距 (%)",
+            yaxis_title="補倉間距 (%)",
+            height=400,
+            margin=dict(l=0, r=0, t=30, b=0),
+            showlegend=True,
+            legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99)
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # 過擬合風險評估
+        render_overfitting_assessment(trials_data, smart_result)
+        
+    except Exception as e:
+        st.error(f"生成熱力圖時發生錯誤: {str(e)}")
+
+
+def render_overfitting_assessment(trials_data, smart_result):
+    """評估過擬合風險"""
+    import numpy as np
+    
+    obj_values = [d["objective"] for d in trials_data]
+    best_obj = smart_result.best_objective
+    
+    # 計算統計數據
+    mean_obj = np.mean(obj_values)
+    std_obj = np.std(obj_values)
+    top_10_pct = np.percentile(obj_values, 90)
+    
+    # 過擬合風險指標
+    # 1. 最佳值與平均值的差距（標準差倍數）
+    z_score = (best_obj - mean_obj) / std_obj if std_obj > 0 else 0
+    
+    # 2. 最佳值在 top 10% 中的位置
+    top_trials = [d for d in trials_data if d["objective"] >= top_10_pct]
+    
+    # 3. 計算 top 10% 的參數分散度
+    if len(top_trials) > 1:
+        tp_std = np.std([d["take_profit"] for d in top_trials])
+        gs_std = np.std([d["grid_spacing"] for d in top_trials])
+        param_spread = (tp_std + gs_std) / 2
+    else:
+        param_spread = 0
+    
+    # 評估風險等級
+    if z_score > 3 and param_spread < 0.1:
+        risk_level = "⚠️ 高"
+        risk_color = "red"
+        risk_msg = "最佳參數位於非常狹窄的區域，可能存在過擬合風險。建議使用更長的歷史數據或進行 Walk-Forward 驗證。"
+    elif z_score > 2 and param_spread < 0.2:
+        risk_level = "🟡 中"
+        risk_color = "orange"
+        risk_msg = "最佳參數區域較為集中，建議進行樣本外驗證。"
+    else:
+        risk_level = "✅ 低"
+        risk_color = "green"
+        risk_msg = "最佳參數位於相對寬廣的區域，參數穩健性較好。"
+    
+    st.markdown(f"""
+    **過擬合風險評估**: <span style="color:{risk_color}">{risk_level}</span>
+    
+    - Z-Score: {z_score:.2f} (最佳值與平均值的偏離程度)
+    - Top 10% 參數分散度: {param_spread:.2f}%
+    - {risk_msg}
+    """, unsafe_allow_html=True)
+
+
+def render_optimization_history(study, smart_result):
+    """渲染優化收斂曲線"""
+    import plotly.graph_objects as go
+    
+    st.markdown("**優化收斂曲線**")
+    st.caption("顯示優化過程中目標值的變化。曲線趨於平穩表示已收斂。")
+    
+    try:
+        # 提取試驗歷史
+        trial_numbers = []
+        trial_values = []
+        best_values = []
+        current_best = float('-inf')
+        
+        for trial in study.trials:
+            if trial.state.name == "COMPLETE" and trial.value is not None:
+                trial_numbers.append(trial.number + 1)
+                trial_values.append(trial.value)
+                current_best = max(current_best, trial.value)
+                best_values.append(current_best)
+        
+        if not trial_numbers:
+            st.info("無試驗數據可顯示")
+            return
+        
+        fig = go.Figure()
+        
+        # 所有試驗點
+        fig.add_trace(go.Scatter(
+            x=trial_numbers,
+            y=trial_values,
+            mode='markers',
+            name='試驗結果',
+            marker=dict(size=6, color='lightblue', opacity=0.6),
+            hovertemplate="試驗 #%{x}<br>目標值: %{y:.4f}<extra></extra>"
+        ))
+        
+        # 最佳值曲線
+        fig.add_trace(go.Scatter(
+            x=trial_numbers,
+            y=best_values,
+            mode='lines',
+            name='當前最佳',
+            line=dict(color='#00CC96', width=3),
+            hovertemplate="試驗 #%{x}<br>最佳值: %{y:.4f}<extra></extra>"
+        ))
+        
+        # 標記最終最佳值
+        fig.add_hline(y=smart_result.best_objective, line_dash="dash", 
+                      line_color="gold", annotation_text=f"最佳: {smart_result.best_objective:.4f}")
+        
+        fig.update_layout(
+            xaxis_title="試驗次數",
+            yaxis_title="目標值",
+            height=350,
+            margin=dict(l=0, r=0, t=30, b=0),
+            legend=dict(yanchor="bottom", y=0.01, xanchor="right", x=0.99)
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # 收斂分析
+        if len(best_values) >= 10:
+            # 檢查最後 20% 的試驗是否有改善
+            cutoff = int(len(best_values) * 0.8)
+            early_best = best_values[cutoff] if cutoff < len(best_values) else best_values[-1]
+            improvement = (smart_result.best_objective - early_best) / abs(early_best) * 100 if early_best != 0 else 0
+            
+            if improvement < 1:
+                st.success(f"✅ 優化已收斂：最後 20% 試驗改善幅度僅 {improvement:.2f}%")
+            else:
+                st.warning(f"⚠️ 優化可能未完全收斂：最後 20% 試驗仍有 {improvement:.2f}% 改善，建議增加試驗次數")
+        
+    except Exception as e:
+        st.error(f"生成收斂曲線時發生錯誤: {str(e)}")
+
+
+def render_parallel_coordinate(study, smart_result):
+    """渲染平行座標圖"""
+    import plotly.express as px
+    import pandas as pd
+    
+    st.markdown("**平行座標圖**")
+    st.caption("同時顯示所有參數與目標值的關係。追蹤高目標值的線條可以看出參數偏好。")
+    
+    try:
+        # 從試驗中提取數據
+        data = []
+        for trial in study.trials:
+            if trial.state.name == "COMPLETE" and trial.value is not None:
+                row = {
+                    "止盈%": trial.params.get("take_profit_spacing", 0) * 100,
+                    "補倉%": trial.params.get("grid_spacing", 0) * 100,
+                    "槓桿": trial.params.get("leverage", 20),
+                    "目標值": trial.value
+                }
+                data.append(row)
+        
+        if len(data) < 5:
+            st.info("試驗數據不足，無法生成平行座標圖")
+            return
+        
+        df = pd.DataFrame(data)
+        
+        # 創建平行座標圖
+        fig = px.parallel_coordinates(
+            df,
+            dimensions=["止盈%", "補倉%", "槓桿", "目標值"],
+            color="目標值",
+            color_continuous_scale="RdYlGn",
+            labels={"color": "目標值"}
+        )
+        
+        fig.update_layout(
+            height=400,
+            margin=dict(l=50, r=50, t=30, b=30),
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # 參數相關性提示
+        st.markdown("""
+        **解讀提示**：
+        - 觀察顏色較深（目標值高）的線條集中在哪個區間
+        - 如果線條在某個參數軸上分散，表示該參數影響較小
+        - 線條交叉較多的區域表示參數之間存在交互作用
+        """)
+        
+    except Exception as e:
+        st.error(f"生成平行座標圖時發生錯誤: {str(e)}")
 
 
 def render_optimization_settings():
@@ -615,12 +904,12 @@ def main():
                 n_trials = st.session_state.get("n_trials", 100)
                 objective = st.session_state.get("objective", "sharpe")
                 
-                results, smart_result = run_optimization(
+                results, smart_result, optimizer = run_optimization(
                     manager, symbol, ccxt_symbol, sym_config, start_date, end_date,
                     use_smart=use_smart, n_trials=n_trials, objective=objective
                 )
                 if results:
-                    render_optimization_results(results, symbol, smart_result)
+                    render_optimization_results(results, symbol, smart_result, optimizer)
 
             st.session_state.run_backtest = False
         else:
