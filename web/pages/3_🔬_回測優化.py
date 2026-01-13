@@ -801,9 +801,20 @@ def render_monte_carlo_simulation(smart_result, df=None, sym_config=None):
     st.markdown("**蒙特卡羅模擬**")
     st.caption("使用最佳參數在多個隨機時間窗口進行回測，評估策略穩健性。結果分布越集中，策略越穩健。")
     
-    if df is None or sym_config is None:
-        st.info("需要原始數據才能進行蒙特卡羅模擬。請重新運行優化。")
+    # 優先使用 session state 中的數據（解決按鈕點擊後數據丟失問題）
+    if df is None:
+        df = st.session_state.get("opt_df")
+    if sym_config is None:
+        sym_config = st.session_state.get("opt_sym_config")
+    if smart_result is None:
+        smart_result = st.session_state.get("opt_smart_result")
+    
+    if df is None or sym_config is None or smart_result is None:
+        st.warning("⚠️ 請先執行智能優化，才能進行蒙特卡羅模擬。")
         return
+    
+    # 顯示數據信息
+    st.info(f"📊 可用數據：{len(df):,} 條 K 線")
     
     # 模擬設定
     col1, col2 = st.columns(2)
@@ -823,15 +834,28 @@ def render_monte_carlo_simulation(smart_result, df=None, sym_config=None):
             help="每次模擬使用的數據比例"
         )
     
-    if st.button("🎲 執行蒙特卡羅模擬", key="run_mc"):
-        run_monte_carlo(smart_result, df, sym_config, n_simulations, window_pct)
+    # 顯示已有結果或執行按鈕
+    if st.session_state.get("mc_results") is not None:
+        # 已有結果，顯示結果和重新執行按鈕
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            if st.button("🔄 重新模擬", key="rerun_mc"):
+                st.session_state.mc_results = None
+                st.rerun()
+        
+        render_monte_carlo_results(st.session_state.mc_results, smart_result)
+    else:
+        # 沒有結果，顯示執行按鈕
+        if st.button("🎲 執行蒙特卡羅模擬", key="run_mc", type="primary"):
+            results = run_monte_carlo(smart_result, df, sym_config, n_simulations, window_pct)
+            if results:
+                st.session_state.mc_results = results
+                st.rerun()
 
 
 def run_monte_carlo(smart_result, df, sym_config, n_simulations, window_pct):
-    """執行蒙特卡羅模擬"""
+    """執行蒙特卡羅模擬，返回結果列表"""
     import numpy as np
-    import plotly.graph_objects as go
-    import plotly.express as px
     from backtest.backtester import Backtester
     from backtest.config import Config as BacktestConfig
     
@@ -850,10 +874,11 @@ def run_monte_carlo(smart_result, df, sym_config, n_simulations, window_pct):
     
     if window_size < 1000:
         st.warning(f"數據量不足，窗口大小 ({window_size} 條) 太小，建議使用更長的歷史數據")
-        return
+        return None
     
     # 進度條
     progress_bar = st.progress(0, text="蒙特卡羅模擬中...")
+    status_text = st.empty()
     
     # 執行模擬
     results = []
@@ -884,18 +909,18 @@ def run_monte_carlo(smart_result, df, sym_config, n_simulations, window_pct):
             })
         except Exception as e:
             # 跳過失敗的模擬
-            pass
+            status_text.caption(f"模擬 {i+1} 失敗: {str(e)[:50]}")
         
         progress_bar.progress((i + 1) / n_simulations, text=f"蒙特卡羅模擬中... {i+1}/{n_simulations}")
     
-    progress_bar.progress(1.0, text="模擬完成!")
+    progress_bar.progress(1.0, text="✅ 模擬完成!")
+    status_text.empty()
     
     if not results:
         st.error("所有模擬都失敗了，請檢查數據或參數")
-        return
+        return None
     
-    # 顯示結果
-    render_monte_carlo_results(results, smart_result)
+    return results
 
 
 def render_monte_carlo_results(results, smart_result):
@@ -1183,6 +1208,14 @@ def main():
                     use_smart=use_smart, n_trials=n_trials, objective=objective
                 )
                 if results:
+                    # 保存到 session state 供蒙特卡羅模擬使用
+                    st.session_state.opt_results = results
+                    st.session_state.opt_smart_result = smart_result
+                    st.session_state.opt_optimizer = optimizer
+                    st.session_state.opt_df = opt_df
+                    st.session_state.opt_sym_config = sym_config
+                    st.session_state.opt_symbol = symbol
+                    
                     render_optimization_results(
                         results, symbol, smart_result, optimizer, 
                         df=opt_df, sym_config=sym_config
