@@ -43,6 +43,14 @@ def get_config() -> GlobalConfig:
 def save_config():
     """儲存配置"""
     st.session_state.config.save()
+    
+    # 如果交易正在運行，通知 Bot 重新載入配置
+    if st.session_state.get("trading_active") and st.session_state.get("bot"):
+        try:
+            st.session_state.bot.reload_config(st.session_state.config)
+            print("[State] 已通知 Bot 重新載入配置")
+        except Exception as e:
+            print(f"[State] 通知 Bot 失敗: {e}")
 
 
 def reload_config():
