@@ -450,8 +450,8 @@ def render_optimization_results(results: list, symbol: str, smart_result=None, o
             row["裝死倍數"] = f"{r['threshold_multiplier']:.1f}"
         rows.append(row)
 
-    df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    results_df = pd.DataFrame(rows)
+    st.dataframe(results_df, use_container_width=True, hide_index=True)
 
     # 顯示參數重要性（智能優化）
     if smart_result and smart_result.param_importance:
