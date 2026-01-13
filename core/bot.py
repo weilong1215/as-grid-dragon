@@ -1155,6 +1155,15 @@ class MaxGridBot:
         # === 2. 領先指標調整 (優先於 ATR) ===
         leading_reason = ""
         if self.config.leading_indicator.enabled:
+            # 先獲取信號 (與終端版一致)
+            leading_signals, leading_values = self.leading_indicator.get_signals(ccxt_symbol)
+            
+            # 更新狀態 (用於 UI 顯示) - 與終端版一致
+            sym_state.leading_ofi = leading_values.get('ofi', 0)
+            sym_state.leading_volume_ratio = leading_values.get('volume_ratio', 1.0)
+            sym_state.leading_spread_ratio = leading_values.get('spread_ratio', 1.0)
+            sym_state.leading_signals = leading_signals
+            
             # 檢查是否應該暫停交易 (極端情況)
             should_pause, pause_reason = self.leading_indicator.should_pause_trading(ccxt_symbol)
             if should_pause:
@@ -1162,8 +1171,8 @@ class MaxGridBot:
                 base_take_profit *= 2.0
                 base_grid_spacing *= 2.0
                 leading_reason = f"暫停:{pause_reason}"
-            else:
-                # 正常領先指標調整
+            elif leading_signals:
+                # 正常領先指標調整 (有信號時才調整)
                 adjusted_spacing, leading_reason = self.leading_indicator.get_spacing_adjustment(
                     ccxt_symbol, base_grid_spacing
                 )
