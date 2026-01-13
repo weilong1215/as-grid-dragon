@@ -1290,7 +1290,7 @@ def main():
             st.session_state.backtest_config = sym_config
             st.session_state.backtest_start = start_date
             st.session_state.backtest_end = end_date
-            st.session_state.backtest_exchange = selected_exchange
+            st.session_state.selected_exchange_type = selected_exchange
             st.session_state.use_smart = use_smart
             st.session_state.n_trials = n_trials
             st.session_state.objective = objective
@@ -1306,7 +1306,7 @@ def main():
             sym_config = st.session_state.backtest_config
             start_date = st.session_state.backtest_start
             end_date = st.session_state.backtest_end
-            exchange_type = st.session_state.get("backtest_exchange", "binance")
+            exchange_type = st.session_state.get("selected_exchange_type", "binance")
 
             if mode == "單筆回測":
                 result = run_single_backtest(
