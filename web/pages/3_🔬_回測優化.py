@@ -314,13 +314,14 @@ def run_optimization(manager: BacktestManager, symbol: str, ccxt_symbol: str,
 
     if df is None or df.empty:
         st.error("載入數據失敗")
-        return None, None
+        return None, None, None, None
 
     st.success(f"載入 {len(df):,} 條 K 線")
 
     # 智能優化模式
     if use_smart and SMART_OPTIMIZER_AVAILABLE:
-        return run_smart_optimization(df, sym_config, n_trials, objective)
+        results, smart_result, optimizer = run_smart_optimization(df, sym_config, n_trials, objective)
+        return results, smart_result, optimizer, df
     else:
         # 傳統網格優化
         if use_smart and not SMART_OPTIMIZER_AVAILABLE:
@@ -334,7 +335,7 @@ def run_optimization(manager: BacktestManager, symbol: str, ccxt_symbol: str,
         results = manager.optimize_params(sym_config, df, update_progress)
         progress_bar.progress(1.0, text="優化完成!")
         
-        return results, None, None
+        return results, None, None, df
 
 
 def run_smart_optimization(df: pd.DataFrame, sym_config: SymbolConfig, 
@@ -404,7 +405,8 @@ def run_smart_optimization(df: pd.DataFrame, sym_config: SymbolConfig,
     return results, result, optimizer
 
 
-def render_optimization_results(results: list, symbol: str, smart_result=None, optimizer=None):
+def render_optimization_results(results: list, symbol: str, smart_result=None, optimizer=None, 
+                                df=None, sym_config=None):
     """渲染優化結果"""
     st.subheader("🏆 優化結果 (Top 10)")
 
@@ -466,7 +468,7 @@ def render_optimization_results(results: list, symbol: str, smart_result=None, o
 
     # 智能優化進階視覺化（需要 optimizer 對象）
     if optimizer is not None and SMART_OPTIMIZER_AVAILABLE:
-        render_advanced_visualizations(optimizer, smart_result)
+        render_advanced_visualizations(optimizer, smart_result, df, sym_config)
 
     # 應用最佳參數
     if results:
@@ -498,7 +500,7 @@ def render_optimization_results(results: list, symbol: str, smart_result=None, o
                 st.rerun()
 
 
-def render_advanced_visualizations(optimizer, smart_result):
+def render_advanced_visualizations(optimizer, smart_result, df=None, sym_config=None):
     """渲染進階優化視覺化圖表"""
     import plotly.express as px
     import plotly.graph_objects as go
@@ -513,7 +515,12 @@ def render_advanced_visualizations(optimizer, smart_result):
         return
     
     # 使用 tabs 組織不同的視覺化
-    tab1, tab2, tab3 = st.tabs(["🔥 參數熱力圖", "📉 收斂曲線", "📊 平行座標圖"])
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "🔥 參數熱力圖", 
+        "📉 收斂曲線", 
+        "📊 平行座標圖",
+        "🎲 蒙特卡羅模擬"
+    ])
     
     with tab1:
         render_contour_plot(study, smart_result)
@@ -523,6 +530,9 @@ def render_advanced_visualizations(optimizer, smart_result):
     
     with tab3:
         render_parallel_coordinate(study, smart_result)
+    
+    with tab4:
+        render_monte_carlo_simulation(smart_result, df, sym_config)
 
 
 def render_contour_plot(study, smart_result):
@@ -782,6 +792,270 @@ def render_parallel_coordinate(study, smart_result):
         st.error(f"生成平行座標圖時發生錯誤: {str(e)}")
 
 
+def render_monte_carlo_simulation(smart_result, df=None, sym_config=None):
+    """渲染蒙特卡羅模擬分析"""
+    import plotly.graph_objects as go
+    import plotly.express as px
+    import numpy as np
+    
+    st.markdown("**蒙特卡羅模擬**")
+    st.caption("使用最佳參數在多個隨機時間窗口進行回測，評估策略穩健性。結果分布越集中，策略越穩健。")
+    
+    if df is None or sym_config is None:
+        st.info("需要原始數據才能進行蒙特卡羅模擬。請重新運行優化。")
+        return
+    
+    # 模擬設定
+    col1, col2 = st.columns(2)
+    with col1:
+        n_simulations = st.select_slider(
+            "模擬次數",
+            options=[20, 50, 100, 200],
+            value=50,
+            key="mc_simulations"
+        )
+    with col2:
+        window_pct = st.select_slider(
+            "窗口大小 (%)",
+            options=[30, 50, 70, 80],
+            value=50,
+            key="mc_window",
+            help="每次模擬使用的數據比例"
+        )
+    
+    if st.button("🎲 執行蒙特卡羅模擬", key="run_mc"):
+        run_monte_carlo(smart_result, df, sym_config, n_simulations, window_pct)
+
+
+def run_monte_carlo(smart_result, df, sym_config, n_simulations, window_pct):
+    """執行蒙特卡羅模擬"""
+    import numpy as np
+    import plotly.graph_objects as go
+    import plotly.express as px
+    from backtest.backtester import Backtester
+    from backtest.config import Config as BacktestConfig
+    
+    # 準備最佳參數配置
+    best_config = BacktestConfig(
+        symbol=sym_config.symbol,
+        initial_quantity=sym_config.initial_quantity,
+        leverage=int(smart_result.best_params.get("leverage", sym_config.leverage)),
+        take_profit_spacing=smart_result.best_params.get("take_profit_spacing", sym_config.take_profit_spacing),
+        grid_spacing=smart_result.best_params.get("grid_spacing", sym_config.grid_spacing),
+    )
+    
+    # 計算窗口大小
+    total_rows = len(df)
+    window_size = int(total_rows * window_pct / 100)
+    
+    if window_size < 1000:
+        st.warning(f"數據量不足，窗口大小 ({window_size} 條) 太小，建議使用更長的歷史數據")
+        return
+    
+    # 進度條
+    progress_bar = st.progress(0, text="蒙特卡羅模擬中...")
+    
+    # 執行模擬
+    results = []
+    backtester = Backtester(best_config)
+    
+    for i in range(n_simulations):
+        # 隨機選擇起始點
+        max_start = total_rows - window_size
+        if max_start <= 0:
+            start_idx = 0
+        else:
+            start_idx = np.random.randint(0, max_start)
+        
+        # 截取數據窗口
+        window_df = df.iloc[start_idx:start_idx + window_size].copy()
+        
+        try:
+            # 執行回測
+            result = backtester.run(window_df)
+            results.append({
+                "simulation": i + 1,
+                "start_idx": start_idx,
+                "return_pct": result.get("return_pct", 0) * 100,
+                "max_drawdown": result.get("max_drawdown", 0) * 100,
+                "win_rate": result.get("win_rate", 0) * 100,
+                "trades": result.get("trades_count", 0),
+                "sharpe": result.get("sharpe_ratio", 0) if result.get("sharpe_ratio") else 0,
+            })
+        except Exception as e:
+            # 跳過失敗的模擬
+            pass
+        
+        progress_bar.progress((i + 1) / n_simulations, text=f"蒙特卡羅模擬中... {i+1}/{n_simulations}")
+    
+    progress_bar.progress(1.0, text="模擬完成!")
+    
+    if not results:
+        st.error("所有模擬都失敗了，請檢查數據或參數")
+        return
+    
+    # 顯示結果
+    render_monte_carlo_results(results, smart_result)
+
+
+def render_monte_carlo_results(results, smart_result):
+    """渲染蒙特卡羅模擬結果"""
+    import numpy as np
+    import pandas as pd
+    import plotly.graph_objects as go
+    import plotly.express as px
+    from plotly.subplots import make_subplots
+    
+    df_results = pd.DataFrame(results)
+    
+    # 統計摘要
+    st.markdown("#### 📊 模擬結果統計")
+    
+    returns = df_results["return_pct"].values
+    drawdowns = df_results["max_drawdown"].values
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        mean_return = np.mean(returns)
+        std_return = np.std(returns)
+        st.metric(
+            "平均收益率",
+            f"{mean_return:.2f}%",
+            delta=f"±{std_return:.2f}%"
+        )
+    
+    with col2:
+        median_return = np.median(returns)
+        st.metric("中位數收益率", f"{median_return:.2f}%")
+    
+    with col3:
+        win_ratio = np.sum(returns > 0) / len(returns) * 100
+        st.metric("正收益比例", f"{win_ratio:.1f}%")
+    
+    with col4:
+        worst_case = np.percentile(returns, 5)
+        st.metric("5% VaR", f"{worst_case:.2f}%", help="最差 5% 情況的收益率")
+    
+    # 收益率分布圖
+    st.markdown("#### 📈 收益率分布")
+    
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=("收益率分布", "收益率 vs 最大回撤"),
+        horizontal_spacing=0.1
+    )
+    
+    # 直方圖
+    fig.add_trace(
+        go.Histogram(
+            x=returns,
+            nbinsx=20,
+            name="收益率分布",
+            marker_color='#636EFA',
+            opacity=0.7
+        ),
+        row=1, col=1
+    )
+    
+    # 添加平均值線
+    fig.add_vline(
+        x=np.mean(returns), 
+        line_dash="dash", 
+        line_color="red",
+        annotation_text=f"平均: {np.mean(returns):.2f}%",
+        row=1, col=1
+    )
+    
+    # 添加原始回測結果線（如果有）
+    original_return = smart_result.best_metrics.get("return_pct", 0) * 100
+    if original_return:
+        fig.add_vline(
+            x=original_return,
+            line_dash="dot",
+            line_color="gold",
+            annotation_text=f"原始: {original_return:.2f}%",
+            row=1, col=1
+        )
+    
+    # 散點圖：收益率 vs 回撤
+    fig.add_trace(
+        go.Scatter(
+            x=drawdowns,
+            y=returns,
+            mode='markers',
+            marker=dict(
+                size=8,
+                color=returns,
+                colorscale='RdYlGn',
+                showscale=True,
+                colorbar=dict(title="收益率%", x=1.02)
+            ),
+            name="模擬結果",
+            hovertemplate="回撤: %{x:.2f}%<br>收益: %{y:.2f}%<extra></extra>"
+        ),
+        row=1, col=2
+    )
+    
+    fig.update_xaxes(title_text="收益率 (%)", row=1, col=1)
+    fig.update_yaxes(title_text="頻率", row=1, col=1)
+    fig.update_xaxes(title_text="最大回撤 (%)", row=1, col=2)
+    fig.update_yaxes(title_text="收益率 (%)", row=1, col=2)
+    
+    fig.update_layout(
+        height=400,
+        showlegend=False,
+        margin=dict(l=0, r=0, t=40, b=0)
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # 穩健性評估
+    st.markdown("#### 🎯 穩健性評估")
+    
+    # 計算穩健性指標
+    cv = std_return / abs(mean_return) if mean_return != 0 else float('inf')  # 變異係數
+    sharpe_consistency = np.mean(df_results["sharpe"].values > 0) * 100  # Sharpe > 0 的比例
+    
+    # 評估等級
+    if cv < 0.5 and win_ratio > 70:
+        robustness_level = "✅ 高"
+        robustness_color = "green"
+        robustness_msg = "策略在不同時間段表現穩定，過擬合風險較低。"
+    elif cv < 1.0 and win_ratio > 50:
+        robustness_level = "🟡 中"
+        robustness_color = "orange"
+        robustness_msg = "策略有一定穩健性，但在某些時間段可能表現不佳。"
+    else:
+        robustness_level = "⚠️ 低"
+        robustness_color = "red"
+        robustness_msg = "策略表現波動較大，可能存在過擬合風險，建議謹慎使用。"
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("變異係數 (CV)", f"{cv:.2f}", help="越低越穩定，< 0.5 為佳")
+    
+    with col2:
+        st.metric("Sharpe > 0 比例", f"{sharpe_consistency:.1f}%")
+    
+    with col3:
+        st.metric("穩健性等級", robustness_level)
+    
+    st.markdown(f"""
+    <div style="padding: 10px; border-left: 4px solid {robustness_color}; background-color: rgba(0,0,0,0.05);">
+    <strong>評估結論</strong>: {robustness_msg}
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # 詳細數據表格（可展開）
+    with st.expander("📋 查看詳細模擬數據"):
+        display_df = df_results[["simulation", "return_pct", "max_drawdown", "win_rate", "trades", "sharpe"]].copy()
+        display_df.columns = ["模擬#", "收益率%", "最大回撤%", "勝率%", "交易數", "Sharpe"]
+        display_df = display_df.round(2)
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+
 def render_optimization_settings():
     """渲染優化設定"""
     st.subheader("🧠 優化設定")
@@ -904,12 +1178,15 @@ def main():
                 n_trials = st.session_state.get("n_trials", 100)
                 objective = st.session_state.get("objective", "sharpe")
                 
-                results, smart_result, optimizer = run_optimization(
+                results, smart_result, optimizer, opt_df = run_optimization(
                     manager, symbol, ccxt_symbol, sym_config, start_date, end_date,
                     use_smart=use_smart, n_trials=n_trials, objective=objective
                 )
                 if results:
-                    render_optimization_results(results, symbol, smart_result, optimizer)
+                    render_optimization_results(
+                        results, symbol, smart_result, optimizer, 
+                        df=opt_df, sym_config=sym_config
+                    )
 
             st.session_state.run_backtest = False
         else:
