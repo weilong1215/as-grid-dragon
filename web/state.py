@@ -87,33 +87,57 @@ def start_trading() -> tuple[bool, str]:
 
     try:
         from core.bot import MaxGridBot
+        import traceback
 
-        st.session_state.bot = MaxGridBot(config)
+        print(f"[DEBUG] 創建 MaxGridBot，config.api_key: {config.api_key[:8]}...")
+        print(f"[DEBUG] exchange_type: {config.exchange_type}")
+        print(f"[DEBUG] 啟用的交易對: {[s.symbol for s in config.symbols.values() if s.enabled]}")
 
-        def run_bot_thread():
+        bot = MaxGridBot(config)
+        st.session_state.bot = bot
+        st.session_state.last_error = None  # 清除上次錯誤
+        print("[DEBUG] MaxGridBot 創建成功")
+
+        # 使用閉包捕獲 bot 和共享狀態容器
+        # (因為 Streamlit session_state 無法在背景線程中存取)
+        thread_state = {"error": None, "loop": None}
+
+        def run_bot_thread(bot_instance, state_container):
             """在獨立執行緒中運行 bot"""
-            st.session_state.bot_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(st.session_state.bot_loop)
+            loop = asyncio.new_event_loop()
+            state_container["loop"] = loop
+            asyncio.set_event_loop(loop)
             try:
-                st.session_state.bot_loop.run_until_complete(
-                    st.session_state.bot.run()
-                )
+                print("[DEBUG] Bot thread started, calling bot.run()...")
+                loop.run_until_complete(bot_instance.run())
             except Exception as e:
-                st.session_state.last_error = str(e)
+                # 保存完整錯誤資訊
+                error_detail = f"{type(e).__name__}: {str(e)}"
+                full_trace = traceback.format_exc()
+                state_container["error"] = error_detail
+                # 輸出到控制台（方便 Debug）
+                print(f"[ERROR] Bot 執行錯誤: {error_detail}")
+                print(f"[ERROR] Traceback:\n{full_trace}")
             finally:
-                st.session_state.bot_loop.close()
-                st.session_state.trading_active = False
+                loop.close()
+                print("[DEBUG] Bot thread ended")
 
+        st.session_state.thread_state = thread_state
         st.session_state.bot_thread = threading.Thread(
             target=run_bot_thread,
+            args=(bot, thread_state),
             daemon=True
         )
         st.session_state.bot_thread.start()
 
-        # 等待連接建立
+        # 等待連接建立 (改進: 如果線程死亡提早退出)
         import time
-        for _ in range(100):  # 最多等 10 秒
+        for i in range(200):  # 最多等 20 秒 (load_markets 可能較慢)
             if st.session_state.bot.state.running:
+                break
+            # 如果線程已死亡，提早退出
+            if not st.session_state.bot_thread.is_alive():
+                time.sleep(0.2)  # 等待錯誤訊息寫入
                 break
             time.sleep(0.1)
 
@@ -123,7 +147,11 @@ def start_trading() -> tuple[bool, str]:
             return True, f"交易已啟動，運行 {len(enabled)} 個交易對"
         else:
             st.session_state.bot = None
-            return False, "Bot 啟動失敗，請檢查 API 設定"
+            # 從線程狀態容器讀取錯誤
+            error_msg = thread_state.get("error", "")
+            if error_msg:
+                return False, f"Bot 啟動失敗: {error_msg}"
+            return False, "Bot 啟動失敗，請檢查 API 設定或網路連接"
 
     except Exception as e:
         st.session_state.last_error = str(e)
@@ -143,12 +171,13 @@ def stop_trading() -> tuple[bool, str]:
         return False, "交易未運行"
 
     try:
+        bot = st.session_state.bot
+        thread_state = st.session_state.get("thread_state", {})
+        loop = thread_state.get("loop")
+
         # 發送停止信號
-        if st.session_state.bot_loop and st.session_state.bot_loop.is_running():
-            asyncio.run_coroutine_threadsafe(
-                st.session_state.bot.stop(),
-                st.session_state.bot_loop
-            )
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(bot.stop(), loop)
 
         # 等待執行緒結束
         if st.session_state.bot_thread and st.session_state.bot_thread.is_alive():
@@ -157,6 +186,7 @@ def stop_trading() -> tuple[bool, str]:
         st.session_state.trading_active = False
         st.session_state.bot = None
         st.session_state.start_time = None
+        st.session_state.thread_state = None
 
         return True, "交易已停止"
 

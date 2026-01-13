@@ -97,7 +97,7 @@ def render_positions_table():
         })
 
     df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width='stretch', hide_index=True)
 
     # 總計
     total_pnl = sum(d['unrealized_pnl'] for d in symbols.values())
@@ -162,7 +162,7 @@ def render_recent_trades():
 
     # 顯示最近 20 條
     df = pd.DataFrame(all_trades[:20])
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width='stretch', hide_index=True)
 
 
 def render_symbol_details():

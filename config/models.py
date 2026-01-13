@@ -205,7 +205,7 @@ class SymbolConfig:
     take_profit_spacing: float = 0.004
     grid_spacing: float = 0.006
     initial_quantity: float = 3
-    leverage: int = 20
+    leverage: int = 10  # 建議 10x，最大 15x (降低爆倉風險)
 
     # 持倉控制 - 動態倍數 (基於 initial_quantity 自動計算)
     # position_limit = initial_quantity × limit_multiplier (觸發止盈加倍)
@@ -218,6 +218,13 @@ class SymbolConfig:
     # "swing": 📊 波動 (1週-1月)
     # "long_cycle": 🌊 大週期 (1月以上)
     trading_mode: str = "swing"
+
+    # === 趨勢過濾器 ===
+    # 當價格在 MA 上方時，只做多不做空
+    # 當價格在 MA 下方時，只做空不做多
+    trend_filter_enabled: bool = False  # 預設關閉，用戶可選擇開啟
+    trend_ma_period: int = 200          # MA 週期 (200 分鐘 ≈ 3.3 小時)
+    trend_buffer_pct: float = 0.005     # 緩衝區 0.5% (避免在 MA 附近頻繁切換)
 
     @property
     def coin_name(self) -> str:
@@ -277,12 +284,24 @@ class SymbolConfig:
 
 @dataclass
 class RiskConfig(SerializableMixin):
-    """風控配置"""
+    """
+    風控配置
+
+    硬止損機制:
+        - hard_stop_enabled: 啟用硬止損
+        - max_loss_pct: 單邊最大虧損百分比 (如 0.03 = 3%)
+        - 當單方向浮虧超過此閾值，強制平倉該方向所有持倉
+    """
     enabled: bool = True
     margin_threshold: float = 0.5
     trailing_start_profit: float = 5.0
     trailing_drawdown_pct: float = 0.10
     trailing_min_drawdown: float = 2.0
+
+    # === 硬止損機制 (防爆倉) ===
+    hard_stop_enabled: bool = True          # 預設開啟
+    max_loss_pct: float = 0.03              # 單邊最大虧損 3% (相對於帳戶權益)
+    max_position_loss_pct: float = 0.05     # 單一交易對最大虧損 5%
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -405,6 +424,8 @@ class SymbolState:
     best_ask: float = 0
     long_position: float = 0
     short_position: float = 0
+    long_avg_price: float = 0      # 多單均價
+    short_avg_price: float = 0     # 空單均價
     unrealized_pnl: float = 0
     buy_long_orders: float = 0
     sell_long_orders: float = 0

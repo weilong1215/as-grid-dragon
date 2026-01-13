@@ -117,29 +117,45 @@ class BinanceAdapter(ExchangeAdapter):
     # ═══════════════════════════════════════════════════════════════════════════
 
     def get_precision(self, symbol: str) -> PrecisionInfo:
-        """獲取交易對精度資訊"""
+        """
+        獲取交易對精度資訊
+        
+        注意: Binance 可能返回浮點精度 (如 0.0001)，需轉換為小數位數 (4)
+        """
+        import math
+        
         if not self._markets_loaded:
             raise RuntimeError("請先呼叫 load_markets()")
+
+        def _to_decimal_places(value):
+            """將浮點精度轉換為小數位數 (如 0.0001 -> 4)"""
+            if isinstance(value, float) and value > 0 and value < 1:
+                return int(abs(math.log10(value)))
+            return int(value) if value else 0
 
         try:
             market = self.exchange.market(symbol)
             precision = market.get("precision", {})
             limits = market.get("limits", {})
 
+            price_prec = _to_decimal_places(precision.get("price", 4))
+            amount_prec = _to_decimal_places(precision.get("amount", 0))
+            min_qty = float(limits.get("amount", {}).get("min", 0) or 0)
+
             return PrecisionInfo(
-                price_precision=precision.get("price", 4),
-                amount_precision=precision.get("amount", 0),
-                min_quantity=limits.get("amount", {}).get("min", 0),
+                price_precision=price_prec,
+                amount_precision=amount_prec,
+                min_quantity=min_qty,
                 min_notional=5.0,  # Binance 最小名義價值
-                tick_size=precision.get("price", 4),
-                step_size=precision.get("amount", 0),
+                tick_size=price_prec,
+                step_size=amount_prec,
             )
         except Exception as e:
             logger.error(f"[Binance] 獲取 {symbol} 精度失敗: {e}")
             return PrecisionInfo(
                 price_precision=4,
                 amount_precision=0,
-                min_quantity=0,
+                min_quantity=1,
                 min_notional=5.0,
             )
 
@@ -407,6 +423,7 @@ class BinanceAdapter(ExchangeAdapter):
 
         Binance 消息格式:
             Combined Stream: {"stream": "xrpusdc@ticker", "data": {...}}
+            Direct Ticker: {"e": "24hrTicker", "s": "XRPUSDC", "c": "0.54", ...}
             User Data: {"e": "ORDER_TRADE_UPDATE", ...}
         """
         try:
@@ -431,9 +448,23 @@ class BinanceAdapter(ExchangeAdapter):
                 elif stream == self._listen_key:
                     return self._parse_user_data(payload)
 
-            # 直接的用戶數據事件
+            # 直接格式 (非 Combined Stream)
             elif "e" in data:
-                return self._parse_user_data(data)
+                event_type = data.get("e")
+                
+                # 24hr Ticker 事件 (直接格式)
+                if event_type == "24hrTicker":
+                    ticker = self._parse_ticker(data)
+                    if ticker:
+                        return WSMessage(
+                            msg_type=WSMessageType.TICKER,
+                            symbol=ticker.symbol,
+                            data=ticker
+                        )
+                
+                # 用戶數據事件
+                else:
+                    return self._parse_user_data(data)
 
             return None
 

@@ -132,10 +132,10 @@ def render_add_symbol():
             leverage = st.number_input(
                 "槓桿倍數",
                 min_value=1,
-                max_value=125,
-                value=20,
+                max_value=15,
+                value=10,
                 step=1,
-                help="合約槓桿倍數"
+                help="建議 10x，最大 15x (降低爆倉風險)"
             )
 
         # 交易模式選擇
@@ -256,9 +256,10 @@ def render_edit_symbol():
             leverage = st.number_input(
                 "槓桿倍數",
                 min_value=1,
-                max_value=125,
-                value=cfg.leverage,
+                max_value=15,
+                value=min(cfg.leverage, 15),  # 舊配置可能超過 15，需要限制
                 step=1,
+                help="建議 10x，最大 15x"
             )
 
             limit_mult = st.number_input(

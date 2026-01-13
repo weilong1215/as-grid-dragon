@@ -108,7 +108,7 @@ def render_api_settings():
             )
 
         # 驗證並保存按鈕
-        if st.button("🔐 驗證並保存 API", type="primary", use_container_width=True):
+        if st.button("🔐 驗證並保存 API", type="primary", width='stretch'):
             if not api_key or not api_secret:
                 st.error("請先填入 API Key 和 Secret")
             elif config.exchange_type == "bitget" and not api_password:

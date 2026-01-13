@@ -157,11 +157,11 @@ def render_control_panel():
             st.info("🟢 交易系統正在運行，監控所有已啟用的交易對")
 
         with col2:
-            if st.button("📊 查看詳情", use_container_width=True):
+            if st.button("📊 查看詳情", width='stretch'):
                 st.switch_page("pages/1_📈_交易監控.py")
 
         with col3:
-            if st.button("⏹️ 停止交易", type="primary", use_container_width=True):
+            if st.button("⏹️ 停止交易", type="primary", width='stretch'):
                 with st.spinner("正在停止..."):
                     success, msg = stop_trading()
                 if success:
@@ -197,11 +197,11 @@ def render_control_panel():
                 st.info("請完成上述設定後再啟動交易")
 
         with col2:
-            if st.button("⚙️ 設定", use_container_width=True):
+            if st.button("⚙️ 設定", width='stretch'):
                 st.switch_page("pages/4_🛠️_設定.py")
 
         with col3:
-            if st.button("▶️ 開始交易", type="primary", use_container_width=True, disabled=not can_start):
+            if st.button("▶️ 開始交易", type="primary", width='stretch', disabled=not can_start):
                 with st.spinner("連接交易所中..."):
                     success, msg = start_trading()
                 if success:

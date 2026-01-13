@@ -110,15 +110,36 @@ class MaxGridBot:
             try:
                 precision = self.adapter.get_precision(sym_cfg.ccxt_symbol)
                 self.precision_info[sym_cfg.ccxt_symbol] = {
-                    "price": precision.price_precision,
-                    "amount": precision.amount_precision,
+                    "price": int(precision.price_precision),
+                    "amount": int(precision.amount_precision),
                     "min_notional": precision.min_notional
                 }
             except Exception as e:
                 logger.error(f"獲取 {sym_cfg.ccxt_symbol} 精度失敗: {e}")
 
+        # 檢查並啟用對沖模式 (與 Terminal 版一致)
+        self._check_hedge_mode()
+
         self.funding_manager = FundingRateManager(self.exchange)
         logger.info(f"[Bot] {self.adapter.get_display_name()} 初始化完成，{len(self.precision_info)} 個交易對")
+
+    def _check_hedge_mode(self):
+        """
+        檢查並啟用對沖模式 (與 Terminal 版一致)
+        
+        Binance 需要啟用 Hedge Mode (雙向持倉) 才能同時持有多空倉位
+        """
+        for sym_config in self.config.symbols.values():
+            if sym_config.enabled:
+                try:
+                    mode = self.exchange.fetch_position_mode(symbol=sym_config.ccxt_symbol)
+                    if not mode.get('hedged', False):
+                        print(f"[Bot] {sym_config.symbol} 啟用對沖模式...")
+                        self.exchange.fapiPrivatePostPositionSideDual({'dualSidePosition': 'true'})
+                        print(f"[Bot] 對沖模式已啟用")
+                        break
+                except Exception as e:
+                    logger.warning(f"[Bot] 檢查對沖模式失敗: {e}")
 
     def _init_state(self):
         for sym_cfg in self.config.symbols.values():
@@ -186,20 +207,76 @@ class MaxGridBot:
         except Exception as e:
             logger.error(f"同步倉位失敗: {e}")
 
+    async def _sync_orders(self):
+        """
+        同步掛單狀態 (與 Terminal 版一致)
+        
+        追蹤每個交易對的掛單數量:
+        - buy_long_orders: 多頭補倉單數量
+        - sell_long_orders: 多頭止盈單數量
+        - buy_short_orders: 空頭止盈單數量
+        - sell_short_orders: 空頭補倉單數量
+        """
+        for sym_config in self.config.symbols.values():
+            if not sym_config.enabled:
+                continue
+            ccxt_symbol = sym_config.ccxt_symbol
+
+            try:
+                orders = self.adapter.fetch_open_orders(ccxt_symbol)
+                state = self.state.symbols.get(ccxt_symbol)
+                if not state:
+                    continue
+
+                # 重置掛單計數
+                state.buy_long_orders = 0
+                state.sell_long_orders = 0
+                state.buy_short_orders = 0
+                state.sell_short_orders = 0
+
+                for order in orders:
+                    qty = abs(float(order.get('amount', 0) or order.get('info', {}).get('origQty', 0)))
+                    side = order.get('side', '').lower()
+                    pos_side = order.get('info', {}).get('positionSide', 'BOTH').upper()
+
+                    if side == 'buy' and pos_side == 'LONG':
+                        state.buy_long_orders += qty
+                    elif side == 'sell' and pos_side == 'LONG':
+                        state.sell_long_orders += qty
+                    elif side == 'buy' and pos_side == 'SHORT':
+                        state.buy_short_orders += qty
+                    elif side == 'sell' and pos_side == 'SHORT':
+                        state.sell_short_orders += qty
+
+            except Exception as e:
+                logger.error(f"同步 {ccxt_symbol} 掛單失敗: {e}")
+
     async def run(self):
-        self._init_exchange()
-        self._init_state()
-        await self._sync_positions()
-        for cfg in self.config.symbols.values():
-            if cfg.enabled:
-                try:
-                    self.adapter.set_leverage(cfg.ccxt_symbol, cfg.leverage)
-                except Exception as e:
-                    logger.warning(f"設置 {cfg.symbol} 槓桿失敗: {e}")
-        # 掛初始網格
-        await self._place_initial_grids()
-        logger.info("[Bot] 啟動 WebSocket...")
-        await self._websocket_loop()
+        try:
+            print("[Bot] 開始初始化交易所...")
+            self._init_exchange()
+            print("[Bot] 交易所初始化完成")
+
+            self._init_state()
+            print("[Bot] 狀態初始化完成，state.running = True")
+
+            await self._sync_positions()
+            print("[Bot] 倉位同步完成")
+
+            for cfg in self.config.symbols.values():
+                if cfg.enabled:
+                    try:
+                        self.adapter.set_leverage(cfg.ccxt_symbol, cfg.leverage)
+                    except Exception as e:
+                        print(f"[Bot] 設置 {cfg.symbol} 槓桿失敗: {e}")
+
+            # 掛初始網格
+            await self._place_initial_grids()
+            print("[Bot] 啟動 WebSocket...")
+            await self._websocket_loop()
+        except Exception as e:
+            print(f"[Bot] run() 執行失敗: {type(e).__name__}: {e}")
+            raise  # 重新拋出讓外層捕獲
 
     async def _place_initial_grids(self):
         """啟動時掛初始網格"""
@@ -240,14 +317,17 @@ class MaxGridBot:
                 # 使用 Adapter 構建 URL
                 url = self.adapter.build_stream_url(symbols, self.listen_key)
 
+                print(f"[Bot] 正在連接 WebSocket: {url[:80]}...")
                 async with websockets.connect(url, ssl=ssl_context, ping_interval=30, ping_timeout=10) as ws:
                     self.ws = ws
                     self.state.connected = True
-                    logger.info(f"[Bot] WebSocket 已連接 ({self.adapter.get_display_name()})")
+                    print(f"[Bot] WebSocket 已連接 ({self.adapter.get_display_name()})")
                     asyncio.create_task(self._sync_loop())
+                    msg_count = 0
                     async for message in ws:
                         if self._stop_event.is_set():
                             break
+                        msg_count += 1
                         await self._handle_message(message)
             except websockets.exceptions.ConnectionClosed:
                 logger.warning("[Bot] WebSocket 連接關閉，重連中...")
@@ -257,9 +337,11 @@ class MaxGridBot:
             await asyncio.sleep(5)
 
     async def _sync_loop(self):
+        """定期同步循環 (與 Terminal 版 sync_all 一致)"""
         while not self._stop_event.is_set():
             await asyncio.sleep(self.config.sync_interval)
             await self._sync_positions()
+            await self._sync_orders()
             # 風控檢查
             await self._risk_monitor_loop()
 
@@ -391,13 +473,20 @@ class MaxGridBot:
         """
         # 標準化 symbol 進行比對
         normalized_raw = normalize_symbol(raw_symbol)
+        matched = False
         for cfg in self.config.symbols.values():
             cfg_normalized = normalize_symbol(cfg.symbol)
+            
             if cfg_normalized == normalized_raw and cfg.ccxt_symbol in self.state.symbols:
+                matched = True
                 sym_state = self.state.symbols[cfg.ccxt_symbol]
+                
+                # 更新價格信息
+                old_price = sym_state.latest_price
                 sym_state.latest_price = ticker_update.price
                 sym_state.best_bid = ticker_update.bid
                 sym_state.best_ask = ticker_update.ask
+
 
                 # 更新領先指標
                 self.leading_indicator.update_spread(cfg.ccxt_symbol, sym_state.best_bid, sym_state.best_ask)
@@ -406,24 +495,58 @@ class MaxGridBot:
                 if self.config.bandit.contextual_enabled:
                     self.bandit_optimizer.update_price(sym_state.latest_price)
 
-                # 間隔控制
+                # 總是嘗試執行網格交易，而不僅僅是間隔控制
+                # 這樣可以確保價格變化時立即響應
+                await self._place_grid(cfg)
+                
+                # 如果價格變動較大，也更新時間戳以避免過於頻繁的網格操作
                 now = time.time()
                 last = self.last_grid_time.get(cfg.ccxt_symbol, 0)
                 if now - last >= self.grid_interval:
                     self.last_grid_time[cfg.ccxt_symbol] = now
-                    await self._place_grid(cfg)
                 break
 
+
     async def _place_grid(self, cfg):
+        """
+        掛出網格訂單 (與 Terminal 版一致)
+        
+        邏輯:
+        - 持倉為 0 時: 在 best_bid/best_ask 下單開倉
+        - 有持倉時: 下止盈單和補倉單
+        """
         ccxt_sym = cfg.ccxt_symbol
         sym_state = self.state.symbols.get(ccxt_sym)
-        if not sym_state or sym_state.latest_price <= 0:
+        if not sym_state:
+            logger.warning(f"[Bot] 無法找到 {ccxt_sym} 的狀態")
             return
-        precision = self.precision_info.get(ccxt_sym, {"price": 4, "amount": 0})
+        
+        # 使用當前價格，如果價格未更新，則跳過本次網格操作
         price = sym_state.latest_price
-        base_qty = cfg.initial_quantity
+        if price <= 0:
+            logger.debug(f"[Bot] {cfg.symbol} 價格未更新 ({price})，跳過本次網格操作")
+            return
+        precision = self.precision_info.get(ccxt_sym, {"price": 4, "amount": 0, "min_notional": 5})
+        min_notional = precision.get("min_notional", 5) * 1.1  # +10% 緩衝，避免邊界問題
+        
+        # 動態計算滿足 min_notional 的最小數量
+        import math
+        min_qty_for_notional = min_notional / price if price > 0 else 1
+        # 向上取整到精度
+        amount_prec = precision.get("amount", 0)
+        if amount_prec > 0:
+            factor = 10 ** amount_prec
+            base_qty = math.ceil(max(cfg.initial_quantity, min_qty_for_notional) * factor) / factor
+        else:
+            base_qty = math.ceil(max(cfg.initial_quantity, min_qty_for_notional))
+        
         long_pos = sym_state.long_position
         short_pos = sym_state.short_position
+        
+        # 計算實際名義價值
+        notional = base_qty * price
+        print(f"[Place] {cfg.symbol} 價格={price:.6f}, 多倉={long_pos}, 空倉={short_pos}, 數量={base_qty}, 名義價值={notional:.2f}U")
+        
         tp_spacing, gs_spacing = cfg.take_profit_spacing, cfg.grid_spacing
         if self.config.bandit.enabled:
             params = self.bandit_optimizer.get_current_params()
@@ -432,12 +555,8 @@ class MaxGridBot:
         if self.config.leading_indicator.enabled:
             adjusted, reason = self.leading_indicator.get_spacing_adjustment(ccxt_sym, gs_spacing)
             gs_spacing = adjusted
-        try:
-            orders = self.adapter.fetch_open_orders(ccxt_sym)
-            for order in orders:
-                await asyncio.to_thread(self.adapter.cancel_order, order['id'], ccxt_sym)
-        except Exception:
-            pass
+
+        # 計算策略決策
         long_decision = GridStrategy.get_grid_decision(
             price=price, my_position=long_pos, opposite_position=short_pos,
             position_threshold=cfg.position_threshold, position_limit=cfg.position_limit,
@@ -448,9 +567,13 @@ class MaxGridBot:
             base_qty=base_qty, take_profit_spacing=tp_spacing, grid_spacing=gs_spacing, side='short')
         sym_state.long_dead_mode = long_decision['dead_mode']
         sym_state.short_dead_mode = short_decision['dead_mode']
+
         try:
-            # 使用 Adapter 統一下單介面
+            # === 多頭處理 ===
+            await self.cancel_orders_for_side(ccxt_sym, 'long')
+            
             if long_pos > 0:
+                # 有持倉: 下止盈單
                 tp_price = round(long_decision['tp_price'], precision['price'])
                 tp_qty = round(min(long_decision['tp_qty'], long_pos), precision['amount'])
                 if tp_qty > 0:
@@ -459,16 +582,26 @@ class MaxGridBot:
                         ccxt_sym, 'sell', tp_qty, tp_price,
                         position_side='LONG', reduce_only=True
                     )
+            
+            # 補倉單 (或無倉時的開倉單)
             if not long_decision['dead_mode'] and long_decision['entry_price']:
                 entry_price = round(long_decision['entry_price'], precision['price'])
                 entry_qty = round(long_decision['entry_qty'], precision['amount'])
+                # 無倉時使用 best_bid，有倉時使用計算的 entry_price
+                if long_pos == 0 and sym_state.best_bid > 0:
+                    entry_price = round(sym_state.best_bid, precision['price'])
                 if entry_qty > 0:
                     await asyncio.to_thread(
                         self.adapter.create_limit_order,
                         ccxt_sym, 'buy', entry_qty, entry_price,
                         position_side='LONG', reduce_only=False
                     )
+
+            # === 空頭處理 ===
+            await self.cancel_orders_for_side(ccxt_sym, 'short')
+            
             if short_pos > 0:
+                # 有持倉: 下止盈單
                 tp_price = round(short_decision['tp_price'], precision['price'])
                 tp_qty = round(min(short_decision['tp_qty'], short_pos), precision['amount'])
                 if tp_qty > 0:
@@ -477,17 +610,61 @@ class MaxGridBot:
                         ccxt_sym, 'buy', tp_qty, tp_price,
                         position_side='SHORT', reduce_only=True
                     )
+            
+            # 補倉單 (或無倉時的開倉單)
             if not short_decision['dead_mode'] and short_decision['entry_price']:
                 entry_price = round(short_decision['entry_price'], precision['price'])
                 entry_qty = round(short_decision['entry_qty'], precision['amount'])
+                # 無倉時使用 best_ask，有倉時使用計算的 entry_price
+                if short_pos == 0 and sym_state.best_ask > 0:
+                    entry_price = round(sym_state.best_ask, precision['price'])
                 if entry_qty > 0:
                     await asyncio.to_thread(
                         self.adapter.create_limit_order,
                         ccxt_sym, 'sell', entry_qty, entry_price,
                         position_side='SHORT', reduce_only=False
                     )
+                    
         except Exception as e:
             logger.error(f"[Bot] {cfg.symbol} 下單失敗: {e}")
+
+    async def cancel_orders_for_side(self, symbol: str, position_side: str):
+        """
+        取消指定方向的掛單 (與 Terminal 版一致)
+        
+        精確判斷取消邏輯:
+        - position_side='long': 取消 BUY LONG (補倉) 和 SELL LONG (止盈) 訂單
+        - position_side='short': 取消 SELL SHORT (補倉) 和 BUY SHORT (止盈) 訂單
+        
+        Args:
+            symbol: CCXT 交易對 (如 XRP/USDC:USDC)
+            position_side: 'long' 或 'short'
+        """
+        try:
+            orders = self.adapter.fetch_open_orders(symbol)
+            for order in orders:
+                order_side = order.get('side', '').lower()
+                order_pos_side = order.get('info', {}).get('positionSide', 'BOTH').upper()
+                reduce_only = order.get('reduceOnly', False) or order.get('info', {}).get('reduceOnly', False)
+
+                should_cancel = False
+                if position_side.lower() == 'long':
+                    # 多頭補倉單: buy + LONG + 非減倉
+                    # 多頭止盈單: sell + LONG + 減倉
+                    if (not reduce_only and order_side == 'buy' and order_pos_side == 'LONG') or \
+                       (reduce_only and order_side == 'sell' and order_pos_side == 'LONG'):
+                        should_cancel = True
+                elif position_side.lower() == 'short':
+                    # 空頭補倉單: sell + SHORT + 非減倉
+                    # 空頭止盈單: buy + SHORT + 減倉
+                    if (not reduce_only and order_side == 'sell' and order_pos_side == 'SHORT') or \
+                       (reduce_only and order_side == 'buy' and order_pos_side == 'SHORT'):
+                        should_cancel = True
+
+                if should_cancel:
+                    await asyncio.to_thread(self.adapter.cancel_order, order['id'], symbol)
+        except Exception as e:
+            logger.error(f"撤單失敗 {symbol}: {e}")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # 風控邏輯
@@ -500,6 +677,9 @@ class MaxGridBot:
 
         # 檢查保證金使用率
         await self._check_margin_threshold()
+
+        # 檢查硬止損 (防爆倉)
+        await self._check_hard_stop()
 
         # 檢查追蹤止盈
         await self._check_trailing_stop()
@@ -516,6 +696,105 @@ class MaxGridBot:
             if margin_ratio >= risk.margin_threshold:
                 logger.warning(f"[Risk] {currency} 保證金使用率 {margin_ratio*100:.1f}% 超過閾值 {risk.margin_threshold*100:.0f}%")
                 # 可以在這裡觸發減倉邏輯
+
+    async def _check_hard_stop(self):
+        """
+        硬止損檢查 - 防止爆倉
+
+        當單方向浮虧超過帳戶權益的 max_loss_pct 時，強制平倉該方向
+        例如: max_loss_pct = 0.03 (3%)，帳戶權益 $1000
+              多單浮虧 > $30 時，強制平倉所有多單
+        """
+        risk = self.config.risk
+        if not risk.hard_stop_enabled:
+            return
+
+        # 計算帳戶總權益
+        total_equity = 0
+        for currency in ["USDC", "USDT"]:
+            acc = self.state.get_account(currency)
+            total_equity += acc.equity
+
+        if total_equity <= 0:
+            return
+
+        max_loss = total_equity * risk.max_loss_pct
+
+        # 檢查每個交易對的多空方向浮虧
+        for cfg in self.config.symbols.values():
+            if not cfg.enabled:
+                continue
+
+            ccxt_sym = cfg.ccxt_symbol
+            sym_state = self.state.symbols.get(ccxt_sym)
+            if not sym_state:
+                continue
+
+            price = sym_state.latest_price
+            if price <= 0:
+                continue
+
+            # 計算多單浮虧 (負數表示虧損)
+            if sym_state.long_position > 0 and sym_state.long_avg_price > 0:
+                long_pnl = (price - sym_state.long_avg_price) * sym_state.long_position
+                if long_pnl < -max_loss:
+                    logger.warning(f"[HardStop] {cfg.symbol} 多單浮虧 ${abs(long_pnl):.2f} 超過閾值 ${max_loss:.2f}")
+                    await self._emergency_close_side(cfg, "long")
+
+            # 計算空單浮虧 (負數表示虧損)
+            if sym_state.short_position > 0 and sym_state.short_avg_price > 0:
+                short_pnl = (sym_state.short_avg_price - price) * sym_state.short_position
+                if short_pnl < -max_loss:
+                    logger.warning(f"[HardStop] {cfg.symbol} 空單浮虧 ${abs(short_pnl):.2f} 超過閾值 ${max_loss:.2f}")
+                    await self._emergency_close_side(cfg, "short")
+
+    async def _emergency_close_side(self, cfg, side: str):
+        """
+        緊急平倉單一方向
+
+        Args:
+            cfg: SymbolConfig
+            side: "long" 或 "short"
+        """
+        ccxt_sym = cfg.ccxt_symbol
+        sym_state = self.state.symbols.get(ccxt_sym)
+        if not sym_state:
+            return
+
+        try:
+            # 取消該方向的掛單
+            orders = self.adapter.fetch_open_orders(ccxt_sym)
+            for order in orders:
+                order_side = order.get('side', '').lower()
+                # 多單平倉掛的是 sell 單，空單平倉掛的是 buy 單
+                if side == "long" and order_side == "sell":
+                    await asyncio.to_thread(self.adapter.cancel_order, order['id'], ccxt_sym)
+                elif side == "short" and order_side == "buy":
+                    await asyncio.to_thread(self.adapter.cancel_order, order['id'], ccxt_sym)
+
+            # 市價平倉
+            if side == "long" and sym_state.long_position > 0:
+                await asyncio.to_thread(
+                    self.adapter.create_market_order,
+                    ccxt_sym, 'sell',
+                    sym_state.long_position,
+                    position_side=side.upper(),
+                    reduce_only=True
+                )
+                logger.warning(f"[HardStop] {cfg.symbol} 強制平多倉 {sym_state.long_position}")
+            
+            elif side == "short" and sym_state.short_position > 0:
+                await asyncio.to_thread(
+                    self.adapter.create_market_order,
+                    ccxt_sym, 'buy',
+                    sym_state.short_position,
+                    position_side=side.upper(),
+                    reduce_only=True
+                )
+                logger.warning(f"[HardStop] {cfg.symbol} 強制平空倉 {sym_state.short_position}")
+
+        except Exception as e:
+            logger.error(f"[HardStop] {cfg.symbol} {side} 平倉失敗: {e}")
 
     async def _check_trailing_stop(self):
         """檢查追蹤止盈"""
@@ -558,29 +837,29 @@ class MaxGridBot:
 
             try:
                 # 取消所有掛單
-                orders = self.exchange.fetch_open_orders(ccxt_sym)
+                orders = self.adapter.fetch_open_orders(ccxt_sym)
                 for order in orders:
-                    await asyncio.to_thread(self.exchange.cancel_order, order['id'], ccxt_sym)
+                    await asyncio.to_thread(self.adapter.cancel_order, order['id'], ccxt_sym)
 
                 # 市價平多倉
                 if sym_state.long_position > 0:
                     await asyncio.to_thread(
-                        self.exchange.create_order,
-                        ccxt_sym, 'market', 'sell',
+                        self.adapter.create_market_order,
+                        ccxt_sym, 'sell',
                         sym_state.long_position,
-                        None,
-                        {'reduceOnly': True}
+                        position_side='LONG',
+                        reduce_only=True
                     )
                     logger.info(f"[Risk] {cfg.symbol} 平多倉 {sym_state.long_position}")
 
                 # 市價平空倉
                 if sym_state.short_position > 0:
                     await asyncio.to_thread(
-                        self.exchange.create_order,
-                        ccxt_sym, 'market', 'buy',
+                        self.adapter.create_market_order,
+                        ccxt_sym, 'buy',
                         sym_state.short_position,
-                        None,
-                        {'reduceOnly': True}
+                        position_side='SHORT',
+                        reduce_only=True
                     )
                     logger.info(f"[Risk] {cfg.symbol} 平空倉 {sym_state.short_position}")
 

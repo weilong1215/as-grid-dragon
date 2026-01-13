@@ -333,7 +333,7 @@ def render_backtest_result(result: dict):
             height=300,
             margin=dict(l=0, r=0, t=30, b=0),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     return result
 
@@ -512,7 +512,7 @@ def render_optimization_results(results: list, symbol: str, smart_result=None, o
         rows.append(row)
 
     results_df = pd.DataFrame(rows)
-    st.dataframe(results_df, use_container_width=True, hide_index=True)
+    st.dataframe(results_df, width='stretch', hide_index=True)
 
     # 顯示參數重要性（智能優化）
     if smart_result and smart_result.param_importance:
@@ -528,7 +528,7 @@ def render_optimization_results(results: list, symbol: str, smart_result=None, o
         fig = px.bar(importance_df, x="重要性", y="參數", orientation="h",
                      color="重要性", color_continuous_scale="Blues")
         fig.update_layout(height=200, margin=dict(l=0, r=0, t=10, b=0))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     # 智能優化進階視覺化（需要 optimizer 對象）
     if optimizer is not None and SMART_OPTIMIZER_AVAILABLE:
@@ -669,7 +669,7 @@ def render_contour_plot(study, smart_result):
             legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99)
         )
         
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
         
         # 過擬合風險評估
         render_overfitting_assessment(trials_data, smart_result)
@@ -787,7 +787,7 @@ def render_optimization_history(study, smart_result):
             legend=dict(yanchor="bottom", y=0.01, xanchor="right", x=0.99)
         )
         
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
         
         # 收斂分析
         if len(best_values) >= 10:
@@ -847,7 +847,7 @@ def render_parallel_coordinate(study, smart_result):
             margin=dict(l=50, r=50, t=30, b=30),
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         # 參數相關性提示
         st.markdown("""
@@ -1120,7 +1120,7 @@ def render_monte_carlo_results(results, smart_result):
         margin=dict(l=0, r=0, t=40, b=0)
     )
     
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
     
     # 穩健性評估
     st.markdown("#### 🎯 穩健性評估")
@@ -1165,7 +1165,7 @@ def render_monte_carlo_results(results, smart_result):
         display_df = df_results[["simulation", "return_pct", "max_drawdown", "win_rate", "trades", "sharpe"]].copy()
         display_df.columns = ["模擬#", "收益率%", "最大回撤%", "勝率%", "交易數", "Sharpe"]
         display_df = display_df.round(2)
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        st.dataframe(display_df, width='stretch', hide_index=True)
 
 
 def render_optimization_settings():
@@ -1283,7 +1283,7 @@ def main():
 
         st.divider()
 
-        if st.button("🚀 開始", type="primary", use_container_width=True):
+        if st.button("🚀 開始", type="primary", width='stretch'):
             st.session_state.backtest_mode = mode
             st.session_state.backtest_symbol = symbol
             st.session_state.backtest_ccxt = ccxt_symbol
