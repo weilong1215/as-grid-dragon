@@ -103,8 +103,12 @@ class BanditConfig(SerializableMixin):
     2. Contextual - 根據市場狀態選擇不同策略
     3. Thompson Sampling - 連續參數空間探索
     4. MDD 懲罰 - 改進 reward 計算
+    
+    純淨模式: enabled=False (預設)
+    - 不會覆蓋用戶設定的止盈/補倉間距
+    - 用戶設什麼參數就用什麼
     """
-    enabled: bool = True
+    enabled: bool = False  # 預設關閉 - 純淨模式
     window_size: int = 50              # 滑動窗口大小 (只看最近 N 筆交易)
     exploration_factor: float = 1.5    # UCB 探索係數 (越大越愛探索)
     min_pulls_per_arm: int = 3         # 每個 arm 至少要試幾次
@@ -168,8 +172,11 @@ class LeadingIndicatorConfig(SerializableMixin):
     1. Order Flow Imbalance (OFI) - 訂單流失衡，反映買賣壓力
     2. Volume Surge - 成交量突增，預示即將突破
     3. Spread Expansion - 買賣價差擴大，預示流動性變差/波動即將放大
+    
+    純淨模式: enabled=False (預設)
+    - 不會根據領先指標調整間距
     """
-    enabled: bool = True
+    enabled: bool = False  # 預設關閉 - 純淨模式
 
     # === OFI (Order Flow Imbalance) ===
     ofi_enabled: bool = True

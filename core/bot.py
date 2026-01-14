@@ -712,12 +712,15 @@ class MaxGridBot:
                 logger.info(f"[DGT] {cfg.symbol} 邊界重置 #{reset_info['reset_count']}: "
                            f"{reset_info['direction']}破, 中心價 {reset_info['old_center']:.4f} -> {reset_info['new_center']:.4f}")
         
-        # Bandit 參數應用 (與終端版一致)
+        # Bandit 參數應用 (修復: 不再覆蓋用戶設定的參數)
+        # 注意: 如果需要啟用 Bandit 自動調參，請在設定頁面開啟 "Bandit 參數覆蓋"
+        # 預設行為: Bandit 僅記錄學習，不覆蓋用戶手動設定的止盈/補倉間距
         if self.config.bandit.enabled:
             bandit_params = self.bandit_optimizer.get_current_params()
-            cfg.grid_spacing = bandit_params.grid_spacing
-            cfg.take_profit_spacing = bandit_params.take_profit_spacing
+            # 僅當啟用增強模式時才覆蓋參數 (用戶明確選擇)
             if self.config.max_enhancement.all_enhancements_enabled:
+                cfg.grid_spacing = bandit_params.grid_spacing
+                cfg.take_profit_spacing = bandit_params.take_profit_spacing
                 self.config.max_enhancement.gamma = bandit_params.gamma
         
         # 更新價格歷史
@@ -797,6 +800,14 @@ class MaxGridBot:
             side: 'long' 或 'short'
             precision: 精度信息
         """
+        # === 關鍵: 防止無倉位時執行止盈 (修復 reduce_only 錯誤) ===
+        if side == 'long' and sym_state.long_position <= 0:
+            logger.debug(f"[Bot] {cfg.symbol} 多頭無倉位，跳過 _place_grid_side")
+            return
+        if side == 'short' and sym_state.short_position <= 0:
+            logger.debug(f"[Bot] {cfg.symbol} 空頭無倉位，跳過 _place_grid_side")
+            return
+        
         ccxt_sym = cfg.ccxt_symbol
         price = sym_state.latest_price
         
@@ -1142,12 +1153,14 @@ class MaxGridBot:
         max_cfg = self.config.max_enhancement
         ccxt_symbol = cfg.ccxt_symbol
         
-        # 基礎間距
+        # 基礎間距 (使用用戶設定的參數)
         base_take_profit = cfg.take_profit_spacing
         base_grid_spacing = cfg.grid_spacing
         
-        # === 1. Bandit 參數 ===
-        if self.config.bandit.enabled:
+        # === 1. Bandit 參數 (修復: 僅在增強模式下覆蓋) ===
+        # 預設行為: Bandit 僅記錄學習，不覆蓋用戶手動設定
+        # 如果需要 Bandit 自動調參，請開啟 "MAX 增強模式" (all_enhancements_enabled)
+        if self.config.bandit.enabled and max_cfg.all_enhancements_enabled:
             params = self.bandit_optimizer.get_current_params()
             base_take_profit = params.take_profit_spacing
             base_grid_spacing = params.grid_spacing
