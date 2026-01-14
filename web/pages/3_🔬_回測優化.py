@@ -25,7 +25,7 @@ from theme import apply_custom_theme
 from components.sidebar import render_sidebar
 apply_custom_theme()
 
-from state import init_session_state, get_config, save_config
+from state import init_session_state, get_config, save_config, check_config_updated
 from config.models import SymbolConfig
 from utils import normalize_symbol
 from core.backtest import BacktestManager
@@ -195,13 +195,16 @@ def render_backtest_params(sym_config: SymbolConfig):
             min_value=1.0,
             value=float(sym_config.initial_quantity),
             step=1.0,
+            help="每次開倉的數量"
         )
 
         leverage = st.number_input(
             "槓桿",
             min_value=1,
-            max_value=125,
-            value=sym_config.leverage,
+            max_value=15,  # 與交易對管理頁面一致，限制 15x
+            value=min(sym_config.leverage, 15),  # 防止舊配置超過 15
+            step=1,
+            help="建議 10x，最大 15x (降低爆倉風險)"
         )
 
     # 更新配置
@@ -1241,6 +1244,11 @@ def main():
     """主函數"""
     # 先渲染側邊欄（確保不被 st.stop() 阻擋）
     render_sidebar()
+    
+    # 檢查配置是否被其他頁面更新
+    if check_config_updated():
+        st.info("✅ 檢測到配置已更新，正在刷新...")
+        st.rerun()
 
     st.title("🔬 回測 / 優化")
     st.divider()

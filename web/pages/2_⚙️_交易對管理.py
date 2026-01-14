@@ -22,7 +22,7 @@ from theme import apply_custom_theme
 from components.sidebar import render_sidebar
 apply_custom_theme()
 
-from state import init_session_state, get_config, save_config
+from state import init_session_state, get_config, save_config, check_config_updated
 from config.models import SymbolConfig
 from utils import normalize_symbol
 
@@ -124,9 +124,9 @@ def render_add_symbol():
                 "每單數量",
                 min_value=1.0,
                 max_value=10000.0,
-                value=10.0,
+                value=3.0,  # 與 SymbolConfig 默認值一致
                 step=1.0,
-                help="每次開倉的數量"
+                help="每次開倉的數量（建議 3-10）"
             )
 
             leverage = st.number_input(
@@ -349,6 +349,11 @@ def main():
     """主函數"""
     # 先渲染側邊欄
     render_sidebar()
+    
+    # 檢查配置是否被其他頁面更新
+    if check_config_updated():
+        st.info("✅ 檢測到配置已更新，正在刷新...")
+        st.rerun()
 
     st.title("⚙️ 交易對管理")
     st.divider()

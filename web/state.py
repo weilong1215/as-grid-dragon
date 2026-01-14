@@ -32,6 +32,7 @@ def init_session_state():
         st.session_state.trading_active = False
         st.session_state.start_time = None
         st.session_state.last_error = None
+        st.session_state.config_version = 0  # 配置版本號
 
 
 def get_config() -> GlobalConfig:
@@ -41,21 +42,71 @@ def get_config() -> GlobalConfig:
 
 
 def save_config():
-    """儲存配置"""
+    """儲存配置並通知所有相關組件"""
     st.session_state.config.save()
+    
+    # 增加配置版本號，讓其他頁面可以檢測到配置已更新
+    st.session_state.config_version = st.session_state.get("config_version", 0) + 1
     
     # 如果交易正在運行，通知 Bot 重新載入配置
     if st.session_state.get("trading_active") and st.session_state.get("bot"):
         try:
             st.session_state.bot.reload_config(st.session_state.config)
-            print("[State] 已通知 Bot 重新載入配置")
+            print(f"[State] 已通知 Bot 重新載入配置 (版本: {st.session_state.config_version})")
         except Exception as e:
             print(f"[State] 通知 Bot 失敗: {e}")
 
 
 def reload_config():
-    """重新載入配置"""
+    """重新載入配置（從檔案讀取最新配置）"""
     st.session_state.config = GlobalConfig.load()
+    # 不增加版本號，因為這是被動更新
+
+
+def check_config_updated() -> bool:
+    """
+    檢查配置是否已被其他頁面更新
+    
+    如果配置版本與檔案不同步，自動重新載入
+    
+    Returns:
+        bool: True 表示配置已更新，需要刷新頁面
+    """
+    init_session_state()
+    
+    # 從檔案讀取最新配置
+    try:
+        file_config = GlobalConfig.load()
+        
+        # 比較主要配置是否不同
+        current_symbols = set(st.session_state.config.symbols.keys())
+        file_symbols = set(file_config.symbols.keys())
+        
+        # 如果交易對數量不同，或任何交易對參數不同
+        if current_symbols != file_symbols:
+            st.session_state.config = file_config
+            return True
+        
+        # 檢查每個交易對的關鍵參數
+        for symbol in current_symbols:
+            current = st.session_state.config.symbols[symbol]
+            file_cfg = file_config.symbols[symbol]
+            
+            # 比較關鍵參數
+            if (current.take_profit_spacing != file_cfg.take_profit_spacing or
+                current.grid_spacing != file_cfg.grid_spacing or
+                current.initial_quantity != file_cfg.initial_quantity or
+                current.leverage != file_cfg.leverage or
+                current.limit_multiplier != file_cfg.limit_multiplier or
+                current.threshold_multiplier != file_cfg.threshold_multiplier or
+                current.enabled != file_cfg.enabled):
+                st.session_state.config = file_config
+                return True
+        
+        return False
+    except Exception as e:
+        print(f"[State] 檢查配置失敗: {e}")
+        return False
 
 
 def is_trading_active() -> bool:
