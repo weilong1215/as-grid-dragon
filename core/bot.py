@@ -738,6 +738,8 @@ class MaxGridBot:
             last_long = self.last_order_times.get(f"{ccxt_sym}_long", 0)
             if time.time() - last_long > 10:
                 await self.cancel_orders_for_side(ccxt_sym, 'long')
+                sym_state.buy_long_orders = 0
+                sym_state.sell_long_orders = 0
                 qty = self._get_adjusted_quantity(cfg, sym_state, 'long', False)
                 qty = round(qty, precision.get('amount', 0))
                 entry_price = round(sym_state.best_bid, precision.get('price', 4)) if sym_state.best_bid > 0 else round(price * 0.999, precision.get('price', 4))
@@ -752,6 +754,7 @@ class MaxGridBot:
                         )
                         self.last_order_times[f"{ccxt_sym}_long"] = time.time()
                         sym_state.last_grid_price_long = price
+                        sym_state.buy_long_orders = 1  # 更新掛單計數
                     except Exception as e:
                         print(f"[Grid] ❌ 多頭開倉失敗: {e}")
                         logger.error(f"[Bot] 多頭開倉失敗 {cfg.symbol}: {e}")
@@ -767,6 +770,8 @@ class MaxGridBot:
             last_short = self.last_order_times.get(f"{ccxt_sym}_short", 0)
             if time.time() - last_short > 10:
                 await self.cancel_orders_for_side(ccxt_sym, 'short')
+                sym_state.buy_short_orders = 0
+                sym_state.sell_short_orders = 0
                 qty = self._get_adjusted_quantity(cfg, sym_state, 'short', False)
                 qty = round(qty, precision.get('amount', 0))
                 entry_price = round(sym_state.best_ask, precision.get('price', 4)) if sym_state.best_ask > 0 else round(price * 1.001, precision.get('price', 4))
@@ -781,6 +786,7 @@ class MaxGridBot:
                         )
                         self.last_order_times[f"{ccxt_sym}_short"] = time.time()
                         sym_state.last_grid_price_short = price
+                        sym_state.sell_short_orders = 1  # 更新掛單計數
                     except Exception as e:
                         print(f"[Grid] ❌ 空頭開倉失敗: {e}")
                         logger.error(f"[Bot] 空頭開倉失敗 {cfg.symbol}: {e}")
@@ -861,6 +867,7 @@ class MaxGridBot:
                                 ccxt_sym, 'sell', tp_qty, special_price,
                                 position_side='LONG', reduce_only=True
                             )
+                            sym_state.sell_long_orders = 1  # 更新掛單計數
                         else:
                             print(f"[Grid]   空頭裝死止盈: BUY {tp_qty} @ {special_price}")
                             await asyncio.to_thread(
@@ -868,6 +875,7 @@ class MaxGridBot:
                                 ccxt_sym, 'buy', tp_qty, special_price,
                                 position_side='SHORT', reduce_only=True
                             )
+                            sym_state.buy_short_orders = 1  # 更新掛單計數
                         logger.info(f"[MAX] {cfg.symbol} {side}頭裝死止盈@{special_price:.4f}")
             else:
                 # === 正常模式 ===
@@ -898,6 +906,7 @@ class MaxGridBot:
                             ccxt_sym, 'sell', tp_qty, tp_price,
                             position_side='LONG', reduce_only=True
                         )
+                        sym_state.sell_long_orders = 1  # 更新掛單計數
                     if base_qty > 0:
                         print(f"[Grid]   多頭補倉: BUY {base_qty} @ {entry_price}")
                         await asyncio.to_thread(
@@ -905,6 +914,7 @@ class MaxGridBot:
                             ccxt_sym, 'buy', base_qty, entry_price,
                             position_side='LONG', reduce_only=False
                         )
+                        sym_state.buy_long_orders = 1  # 更新掛單計數
                 else:
                     if my_position > 0 and tp_qty > 0:
                         print(f"[Grid]   空頭止盈: BUY {tp_qty} @ {tp_price}")
@@ -913,6 +923,7 @@ class MaxGridBot:
                             ccxt_sym, 'buy', tp_qty, tp_price,
                             position_side='SHORT', reduce_only=True
                         )
+                        sym_state.buy_short_orders = 1  # 更新掛單計數
                     if base_qty > 0:
                         print(f"[Grid]   空頭補倉: SELL {base_qty} @ {entry_price}")
                         await asyncio.to_thread(
@@ -920,6 +931,7 @@ class MaxGridBot:
                             ccxt_sym, 'sell', base_qty, entry_price,
                             position_side='SHORT', reduce_only=False
                         )
+                        sym_state.sell_short_orders = 1  # 更新掛單計數
                 
                 logger.info(f"[MAX] {cfg.symbol} {side}頭 止盈@{tp_price:.4f}({tp_qty:.1f}) "
                            f"補倉@{entry_price:.4f}({base_qty:.1f}) [TP:{tp_spacing*100:.2f}%/GS:{gs_spacing*100:.2f}%]")
@@ -1030,6 +1042,8 @@ class MaxGridBot:
         try:
             # === 多頭處理 ===
             await self.cancel_orders_for_side(ccxt_sym, 'long')
+            sym_state.buy_long_orders = 0  # 清零計數器
+            sym_state.sell_long_orders = 0
             
             if long_pos > 0:
                 # 有持倉: 下止盈單
@@ -1042,6 +1056,7 @@ class MaxGridBot:
                         ccxt_sym, 'sell', tp_qty, tp_price,
                         position_side='LONG', reduce_only=True
                     )
+                    sym_state.sell_long_orders = 1  # 更新掛單計數
             
             # 補倉單 (或無倉時的開倉單)
             if not long_decision['dead_mode'] and long_decision['entry_price']:
@@ -1058,9 +1073,12 @@ class MaxGridBot:
                         ccxt_sym, 'buy', entry_qty, entry_price,
                         position_side='LONG', reduce_only=False
                     )
+                    sym_state.buy_long_orders = 1  # 更新掛單計數
 
             # === 空頭處理 ===
             await self.cancel_orders_for_side(ccxt_sym, 'short')
+            sym_state.buy_short_orders = 0  # 清零計數器
+            sym_state.sell_short_orders = 0
             
             if short_pos > 0:
                 # 有持倉: 下止盈單
@@ -1073,6 +1091,7 @@ class MaxGridBot:
                         ccxt_sym, 'buy', tp_qty, tp_price,
                         position_side='SHORT', reduce_only=True
                     )
+                    sym_state.buy_short_orders = 1  # 更新掛單計數
             
             # 補倉單 (或無倉時的開倉單)
             if not short_decision['dead_mode'] and short_decision['entry_price']:
@@ -1089,6 +1108,7 @@ class MaxGridBot:
                         ccxt_sym, 'sell', entry_qty, entry_price,
                         position_side='SHORT', reduce_only=False
                     )
+                    sym_state.sell_short_orders = 1  # 更新掛單計數
             
 
             self.last_grid_time[ccxt_sym] = time.time()
