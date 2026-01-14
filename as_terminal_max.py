@@ -2055,8 +2055,10 @@ class GlobalConfig:
     legacy_api_detected: bool = field(default=False, repr=False)
 
     def to_dict(self) -> dict:
-        # 注意：不儲存 api_key 和 api_secret，這些應該使用加密儲存
+        # 保存 API 凭证到配置文件
         return {
+            "api_key": self.api_key,
+            "api_secret": self.api_secret,
             "websocket_url": self.websocket_url,
             "sync_interval": self.sync_interval,
             "symbols": {k: v.to_dict() for k, v in self.symbols.items()},
@@ -2069,24 +2071,13 @@ class GlobalConfig:
 
     @classmethod
     def from_dict(cls, data: dict) -> 'GlobalConfig':
-        # 注意：不從配置檔載入 api_key 和 api_secret，這些應該由加密儲存提供
-
-        # Story 1.4: 偵測舊版明文 API
-        legacy_api_detected = False
-        if data.get("api_key") or data.get("api_secret"):
-            legacy_api_detected = True
-            # 使用 debug 層級，避免與 GUI 日誌重複顯示警告
-            logger = logging.getLogger(__name__)
-            logger.debug(
-                "偵測到配置檔包含明文 API 金鑰，legacy_api_detected=True"
-            )
-
+        # 从配置文件加载 API 凭证
         config = cls(
-            api_key="",  # 不從 JSON 載入，應由 SecureStorage 提供
-            api_secret="",  # 不從 JSON 載入，應由 SecureStorage 提供
+            api_key=data.get("api_key", ""),
+            api_secret=data.get("api_secret", ""),
             websocket_url=data.get("websocket_url", "wss://fstream.binance.com/ws"),
             sync_interval=data.get("sync_interval", 30.0),
-            legacy_api_detected=legacy_api_detected
+            legacy_api_detected=False
         )
         for k, v in data.get("symbols", {}).items():
             config.symbols[k] = SymbolConfig.from_dict(v)
@@ -4622,7 +4613,18 @@ class MainMenu:
 
     def reload_config(self):
         """重新載入配置並套用到運行中的 bot"""
+        # 保存当前的 API 凭证（如果有的话）
+        old_api_key = self.config.api_key if self.config else ""
+        old_api_secret = self.config.api_secret if self.config else ""
+        
+        # 重新加载配置
         self.config = GlobalConfig.load()
+        
+        # 如果新配置中没有 API 凭证，但旧配置有，则保留旧的
+        if not self.config.api_key and old_api_key:
+            self.config.api_key = old_api_key
+        if not self.config.api_secret and old_api_secret:
+            self.config.api_secret = old_api_secret
 
         if self._trading_active and self.bot:
             # 更新 bot 的配置引用
