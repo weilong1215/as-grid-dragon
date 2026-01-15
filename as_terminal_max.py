@@ -2840,7 +2840,15 @@ class MaxGridBot:
             else:
                 return self.exchange.create_order(symbol, 'limit', side, quantity, price, params)
         except Exception as e:
-            logger.error(f"下單失敗 {symbol}: {e}")
+            error_msg = str(e)
+            # ReduceOnly 錯誤特殊處理：記錄並暫停該交易對下單
+            if "ReduceOnly" in error_msg or "-2022" in error_msg:
+                logger.error(f"[Grid] ❌ {symbol} {position_side}頭下單失敗: {error_msg}")
+                logger.warning(f"[Grid] {symbol} 檢測到 ReduceOnly 錯誤，暫停 60 秒下單")
+                # 設置冷卻時間
+                self.last_order_times[f"{symbol}_{position_side}_error"] = time.time() + 60
+            else:
+                logger.error(f"下單失敗 {symbol}: {e}")
             return None
 
     def cancel_orders_for_side(self, symbol: str, position_side: str):
@@ -3190,10 +3198,28 @@ class MaxGridBot:
             )
 
             if side == 'long':
+                # 檢查是否有錯誤冷卻
+                error_key = f"{ccxt_symbol}_long_error"
+                if error_key in self.last_order_times:
+                    if time.time() < self.last_order_times[error_key]:
+                        logger.debug(f"[Grid] {sym_config.symbol} 多頭冷卻中，跳過下單")
+                        return
+                    else:
+                        del self.last_order_times[error_key]
+                
                 if sym_state.long_position > 0:
                     self.place_order(ccxt_symbol, 'sell', tp_price, tp_qty, True, 'long')
                 self.place_order(ccxt_symbol, 'buy', entry_price, base_qty, False, 'long')
             else:
+                # 檢查是否有錯誤冷卻
+                error_key = f"{ccxt_symbol}_short_error"
+                if error_key in self.last_order_times:
+                    if time.time() < self.last_order_times[error_key]:
+                        logger.debug(f"[Grid] {sym_config.symbol} 空頭冷卻中，跳過下單")
+                        return
+                    else:
+                        del self.last_order_times[error_key]
+                
                 if sym_state.short_position > 0:
                     self.place_order(ccxt_symbol, 'buy', tp_price, tp_qty, True, 'short')
                 self.place_order(ccxt_symbol, 'sell', entry_price, base_qty, False, 'short')
