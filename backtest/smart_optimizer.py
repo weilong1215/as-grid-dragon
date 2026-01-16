@@ -1,11 +1,5 @@
 # Author: louis
 # Threads: https://www.threads.com/@mr.__.l
-"""
-Bitget Adapter (Zeabur Final Version)
-==============
-修正抽象類別缺失方法：build_stream_url, keepalive_user_stream, set_leverage
-同時修正持倉同步與歸零問題
-"""
 
 import json
 import logging
@@ -31,257 +25,165 @@ from .base import (
 
 logger = logging.getLogger("as_grid_max")
 
-# Bitget WebSocket URLs
-BITGET_WS_MAINNET = "wss://ws.bitget.com/v2/ws/private"
-BITGET_WS_PUBLIC_MAINNET = "wss://ws.bitget.com/v2/ws/public"
-BITGET_PING_INTERVAL = 30
-
 class BitgetAdapter(ExchangeAdapter):
     def __init__(self):
         super().__init__()
         self._testnet = False
-        self._api_key: str = ""
-        self._api_secret: str = ""
-        self._password: str = ""
+        self._api_key = ""
+        self._api_secret = ""
+        self._password = ""
 
-    def get_exchange_name(self) -> str:
-        return "bitget"
-
-    def get_display_name(self) -> str:
-        return "Bitget"
-    
-    def needs_rest_ticker(self) -> bool:
-        return True
+    def get_exchange_name(self) -> str: return "bitget"
+    def get_display_name(self) -> str: return "Bitget"
+    def needs_rest_ticker(self) -> bool: return True
 
     def init_exchange(self, api_key: str, api_secret: str, testnet: bool = False, password: str = "") -> None:
         self._testnet = testnet
         self._api_key = api_key
         self._api_secret = api_secret
         self._password = password
-        options = {
-            "apiKey": api_key,
-            "secret": api_secret,
-            "password": password,
-            "options": {"defaultType": "swap"}
-        }
-        if testnet:
-            options["sandbox"] = True
-        self.exchange = ccxt.bitget(options)
+        opts = {"apiKey": api_key, "secret": api_secret, "password": password, "options": {"defaultType": "swap"}}
+        if testnet: opts["sandbox"] = True
+        self.exchange = ccxt.bitget(opts)
         self.exchange.options["defaultType"] = "swap"
-        logger.info(f"[Bitget] 交易所初始化完成")
 
     def load_markets(self) -> None:
-        if not self.exchange:
-            raise RuntimeError("請先呼叫 init_exchange()")
-        self.exchange.load_markets(reload=False)
-        self._markets_loaded = True
+        if self.exchange: self.exchange.load_markets(False); self._markets_loaded = True
 
     def get_precision(self, symbol: str) -> PrecisionInfo:
         import math
-        if not self._markets_loaded:
-            self.load_markets()
-        def _to_decimal_places(value):
-            if isinstance(value, float) and value > 0 and value < 1:
-                return int(abs(math.log10(value)))
-            return int(value) if value else 0
+        if not self._markets_loaded: self.load_markets()
+        def _tp(v): return int(abs(math.log10(v))) if isinstance(v, float) and 0 < v < 1 else int(v) if v else 0
         try:
-            market = self.exchange.market(symbol)
-            precision = market.get("precision", {})
-            limits = market.get("limits", {})
-            p_prec = _to_decimal_places(precision.get("price", 4))
-            a_prec = _to_decimal_places(precision.get("amount", 0))
-            return PrecisionInfo(p_prec, a_prec, float(limits.get("amount", {}).get("min", 0) or 0), 5.0, p_prec, a_prec)
-        except:
-            return PrecisionInfo(4, 0, 1, 5.0, 4, 0)
+            m = self.exchange.market(symbol)
+            p = m.get("precision", {})
+            l = m.get("limits", {})
+            pp, ap = _tp(p.get("price", 4)), _tp(p.get("amount", 0))
+            return PrecisionInfo(pp, ap, float(l.get("amount", {}).get("min", 0)), 5.0, pp, ap)
+        except: return PrecisionInfo(4, 0, 1, 5.0, 4, 0)
 
-    def convert_symbol_to_ccxt(self, raw_symbol: str) -> str:
-        raw = raw_symbol.upper().replace("/", "").replace(":", "")
-        for quote in ["USDC", "USDT"]:
-            if raw.endswith(quote):
-                return f"{raw[:-len(quote)]}/{quote}:{quote}"
-        return raw_symbol
+    def convert_symbol_to_ccxt(self, s: str) -> str:
+        s = s.upper().replace("/", "").replace(":", "")
+        for q in ["USDC", "USDT"]:
+            if s.endswith(q): return f"{s[:-len(q)]}/{q}:{q}"
+        return s
 
-    def convert_symbol_to_ws(self, raw_symbol: str) -> str:
-        if ":" in raw_symbol:
-            raw_symbol = raw_symbol.split(":")[0]
-        return raw_symbol.replace("/", "").replace(":", "").upper()
+    def convert_symbol_to_ws(self, s: str) -> str:
+        return s.split(":")[0].replace("/", "").upper() if ":" in s else s.replace("/", "").upper()
 
     def fetch_balance(self) -> Dict[str, BalanceUpdate]:
-        result = {}
+        res = {}
         try:
-            balance = self.exchange.fetch_balance({"type": "swap"})
-            for currency in ["USDC", "USDT"]:
-                if currency in balance:
-                    info = balance[currency]
-                    result[currency] = BalanceUpdate(currency, float(info.get("total", 0) or 0), float(info.get("free", 0) or 0))
-        except:
-            pass
-        return result
+            b = self.exchange.fetch_balance({"type": "swap"})
+            for c in ["USDC", "USDT"]:
+                if c in b: res[c] = BalanceUpdate(c, float(b[c].get("total", 0)), float(b[c].get("free", 0)))
+        except: pass
+        return res
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    # 修正持倉獲取：確保 0 倉位也能正確回傳，解決歸零問題
-    # ═══════════════════════════════════════════════════════════════════════════
     def fetch_positions(self) -> List[PositionUpdate]:
-        result = []
+        res = []
         try:
-            positions = self.exchange.fetch_positions()
-            for pos in positions:
-                contracts = float(pos.get("contracts", 0) or pos.get("size", 0) or 0)
-                # 即使 contracts == 0 也繼續執行，確保主程式能看到歸零
-                side = pos.get("side", "").upper()
-                if side not in ["LONG", "SHORT"]:
-                    continue
-                result.append(PositionUpdate(
-                    symbol=pos.get("symbol", ""),
-                    position_side=side,
-                    quantity=abs(contracts),
-                    entry_price=float(pos.get("entryPrice", 0) or 0),
-                    unrealized_pnl=float(pos.get("unrealizedPnl", 0) or 0),
-                    leverage=int(pos.get("leverage", 1) or 1),
-                ))
-        except Exception as e:
-            logger.error(f"[Bitget] 獲取持倉失敗: {e}")
-        return result
+            ps = self.exchange.fetch_positions()
+            for p in ps:
+                qty = abs(float(p.get("contracts", 0) or p.get("size", 0) or 0))
+                sd = p.get("side", "").upper()
+                if sd in ["LONG", "SHORT"]:
+                    res.append(PositionUpdate(p.get("symbol", ""), sd, qty, float(p.get("entryPrice", 0)), float(p.get("unrealizedPnl", 0)), int(p.get("leverage", 1))))
+        except: pass
+        return res
 
-    def set_leverage(self, symbol: str, leverage: int) -> bool:
-        """實作父類別要求的 set_leverage"""
-        try:
-            self.exchange.set_leverage(leverage, symbol)
-            return True
-        except:
-            return False
+    # --- 關鍵修正：確保這些方法名稱與參數與父類別完全一致 ---
+    def set_leverage(self, symbol: str, leverage: int, params: dict = {}) -> bool:
+        try: self.exchange.set_leverage(leverage, symbol, params); return True
+        except: return False
 
     def create_limit_order(self, symbol: str, side: str, amount: float, price: float, position_side: str = "BOTH", reduce_only: bool = False) -> Dict:
-        params = {'hedged': True}
-        if reduce_only: params['reduceOnly'] = True
-        if position_side == "LONG": params["holdSide"] = "long"
-        elif position_side == "SHORT": params["holdSide"] = "short"
-        return self.exchange.create_order(symbol, "limit", side.lower(), amount, price, params)
+        p = {'hedged': True}
+        if reduce_only: p['reduceOnly'] = True
+        if position_side == "LONG": p["holdSide"] = "long"
+        elif position_side == "SHORT": p["holdSide"] = "short"
+        return self.exchange.create_order(symbol, "limit", side.lower(), amount, price, p)
 
     def create_market_order(self, symbol: str, side: str, amount: float, position_side: str = "BOTH", reduce_only: bool = False) -> Dict:
-        params = {'hedged': True}
-        if reduce_only: params['reduceOnly'] = True
-        if position_side == "LONG": params["holdSide"] = "long"
-        elif position_side == "SHORT": params["holdSide"] = "short"
-        return self.exchange.create_order(symbol, "market", side.lower(), amount, None, params)
+        p = {'hedged': True}
+        if reduce_only: p['reduceOnly'] = True
+        if position_side == "LONG": p["holdSide"] = "long"
+        elif position_side == "SHORT": p["holdSide"] = "short"
+        return self.exchange.create_order(symbol, "market", side.lower(), amount, None, p)
 
     def cancel_order(self, order_id: str, symbol: str) -> bool:
-        try:
-            self.exchange.cancel_order(order_id, symbol)
-            return True
-        except:
-            return False
+        try: self.exchange.cancel_order(order_id, symbol); return True
+        except: return False
 
     def fetch_open_orders(self, symbol: Optional[str] = None) -> List[Dict]:
-        try:
-            return self.exchange.fetch_open_orders(symbol)
-        except:
-            return []
+        try: return self.exchange.fetch_open_orders(symbol)
+        except: return []
 
     def fetch_funding_rate(self, symbol: str) -> float:
-        try:
-            funding = self.exchange.fetch_funding_rate(symbol)
-            return float(funding.get("fundingRate", 0) or 0)
-        except:
-            return 0.0
+        try: return float(self.exchange.fetch_funding_rate(symbol).get("fundingRate", 0))
+        except: return 0.0
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    # WebSocket 實作缺失方法
-    # ═══════════════════════════════════════════════════════════════════════════
-    def get_websocket_url(self) -> str:
-        return BITGET_WS_MAINNET
-
-    def get_public_websocket_url(self) -> str:
-        return BITGET_WS_PUBLIC_MAINNET
+    # --- WebSocket 抽象方法實作 ---
+    def get_websocket_url(self) -> str: return "wss://ws.bitget.com/v2/ws/private"
+    def get_public_websocket_url(self) -> str: return "wss://ws.bitget.com/v2/ws/public"
 
     def build_stream_url(self, symbols: List[str], user_stream_key: Optional[str] = None) -> str:
-        """實作父類別要求的 build_stream_url"""
         return self.get_websocket_url()
+
+    async def keepalive_user_stream(self) -> None:
+        pass
 
     async def start_user_stream(self) -> Optional[str]:
         if not self._api_key: return None
         ts = str(int(time.time()))
-        message = f"{ts}GET/user/verify"
-        signature = base64.b64encode(hmac.new(self._api_secret.encode(), message.encode(), hashlib.sha256).digest()).decode()
-        return json.dumps({"op": "login", "args": [{"apiKey": self._api_key, "passphrase": self._password, "timestamp": ts, "sign": signature}]})
+        sign = base64.b64encode(hmac.new(self._api_secret.encode(), f"{ts}GET/user/verify".encode(), hashlib.sha256).digest()).decode()
+        return json.dumps({"op": "login", "args": [{"apiKey": self._api_key, "passphrase": self._password, "timestamp": ts, "sign": sign}]})
 
-    async def keepalive_user_stream(self) -> None:
-        """實作父類別要求的 keepalive_user_stream"""
-        pass
-
-    def get_keepalive_interval(self) -> int:
-        return BITGET_PING_INTERVAL
+    def get_keepalive_interval(self) -> int: return 30
 
     def get_subscription_message(self, symbols: List[str]) -> str:
-        args = [
-            {"instType": "USDT-FUTURES", "channel": "orders", "instId": "default"},
-            {"instType": "USDT-FUTURES", "channel": "positions", "instId": "default"},
-            {"instType": "USDT-FUTURES", "channel": "account", "coin": "default"}
-        ]
+        args = [{"instType": "USDT-FUTURES", "channel": "orders", "instId": "default"},
+                {"instType": "USDT-FUTURES", "channel": "positions", "instId": "default"},
+                {"instType": "USDT-FUTURES", "channel": "account", "coin": "default"}]
         return json.dumps({"op": "subscribe", "args": args})
 
-    def parse_ws_message(self, raw_message: str) -> Optional[WSMessage]:
+    def parse_ws_message(self, raw: str) -> Optional[WSMessage]:
         try:
-            data = json.loads(raw_message)
-            if "event" in data or data.get("op") == "pong": return None
-            arg = data.get("arg", {}); channel = arg.get("channel", ""); payload = data.get("data", [])
-            if not payload: return None
-            if channel == "orders":
-                order = self._parse_order_update(payload[0])
-                if order: return WSMessage(WSMessageType.ORDER_UPDATE, order.symbol, order)
-            elif channel == "positions":
-                account = self._parse_position_update(payload)
-                if account: return WSMessage(WSMessageType.ACCOUNT_UPDATE, data=account)
-            elif channel == "account":
-                account = self._parse_account_data(payload)
-                if account: return WSMessage(WSMessageType.ACCOUNT_UPDATE, data=account)
+            d = json.loads(raw)
+            if "event" in d or d.get("op") == "pong": return None
+            arg = d.get("arg", {}); ch = arg.get("channel", ""); py = d.get("data", [])
+            if not py: return None
+            if ch == "orders":
+                o = self._parse_order_update(py[0])
+                if o: return WSMessage(WSMessageType.ORDER_UPDATE, o.symbol, o)
+            elif ch == "positions":
+                a = self._p_pos(py)
+                if a: return WSMessage(WSMessageType.ACCOUNT_UPDATE, data=a)
+            elif ch == "account":
+                a = self._p_acc(py)
+                if a: return WSMessage(WSMessageType.ACCOUNT_UPDATE, data=a)
             return None
-        except:
-            return None
+        except: return None
 
-    def _parse_order_update(self, order_data: dict) -> Optional[OrderUpdate]:
+    def _parse_order_update(self, o: dict) -> Optional[OrderUpdate]:
         try:
-            raw = order_data.get("instId", "")
-            status_map = {"live": "NEW", "new": "NEW", "partially_filled": "PARTIALLY_FILLED", "filled": "FILLED", "cancelled": "CANCELED"}
-            return OrderUpdate(
-                symbol=self.convert_symbol_to_ccxt(raw),
-                order_id=str(order_data.get("ordId", "")),
-                side=order_data.get("side", "").upper(),
-                position_side=order_data.get("posSide", "BOTH").upper(),
-                status=status_map.get(order_data.get("status", "").lower(), "UNKNOWN"),
-                order_type=order_data.get("ordType", "").upper(),
-                quantity=float(order_data.get("sz", 0)),
-                filled_quantity=float(order_data.get("fillSz", 0)),
-                price=float(order_data.get("px", 0)),
-                avg_price=float(order_data.get("avgPx", 0)),
-                realized_pnl=float(order_data.get("pnl", 0)),
-                commission=abs(float(order_data.get("fee", 0))),
-                is_reduce_only=str(order_data.get("reduceOnly", "false")).lower() == "true",
-                timestamp=float(order_data.get("uTime", time.time()*1000))/1000,
-            )
-        except:
-            return None
+            m = {"live": "NEW", "new": "NEW", "filled": "FILLED", "cancelled": "CANCELED"}
+            return OrderUpdate(self.convert_symbol_to_ccxt(o.get("instId", "")), str(o.get("ordId", "")), o.get("side", "").upper(), o.get("posSide", "BOTH").upper(), m.get(o.get("status", "").lower(), "UNKNOWN"), o.get("ordType", "").upper(), float(o.get("sz", 0)), float(o.get("fillSz", 0)), float(o.get("px", 0)), float(o.get("avgPx", 0)), float(o.get("pnl", 0)), abs(float(o.get("fee", 0))), str(o.get("reduceOnly", "")).lower() == "true", float(o.get("uTime", time.time()*1000))/1000)
+        except: return None
 
-    def _parse_position_update(self, positions: list) -> Optional[AccountUpdate]:
+    def _p_pos(self, ps: list) -> Optional[AccountUpdate]:
         try:
-            result = []
-            for pos in positions:
-                total = float(pos.get("total", 0) or pos.get("available", 0) or 0)
-                raw = pos.get("instId", "")
-                hold_side = pos.get("holdSide", "").upper()
-                if hold_side not in ["LONG", "SHORT"]: continue
-                result.append(PositionUpdate(self.convert_symbol_to_ccxt(raw), hold_side, abs(total), float(pos.get("avgPx", 0)), float(pos.get("upl", 0)), int(pos.get("lever", 1))))
-            return AccountUpdate(result, [], time.time())
-        except:
-            return None
+            res = []
+            for p in ps:
+                res.append(PositionUpdate(self.convert_symbol_to_ccxt(p.get("instId", "")), p.get("holdSide", "").upper(), abs(float(p.get("total", 0))), float(p.get("avgPx", 0)), float(p.get("upl", 0)), int(p.get("lever", 1))))
+            return AccountUpdate(res, [], time.time())
+        except: return None
 
-    def _parse_account_data(self, account_data: list) -> Optional[AccountUpdate]:
+    def _p_acc(self, ac: list) -> Optional[AccountUpdate]:
         try:
-            balances = []
-            for acc in account_data:
-                currency = acc.get("coin", "").upper()
-                if currency in ["USDC", "USDT"]:
-                    balances.append(BalanceUpdate(currency, float(acc.get("equity", 0)), float(acc.get("available", 0))))
-            return AccountUpdate([], balances, time.time())
-        except:
-            return None
+            bl = []
+            for a in ac:
+                if a.get("coin", "").upper() in ["USDC", "USDT"]:
+                    bl.append(BalanceUpdate(a.get("coin", "").upper(), float(a.get("equity", 0)), float(a.get("available", 0))))
+            return AccountUpdate([], bl, time.time())
+        except: return None
