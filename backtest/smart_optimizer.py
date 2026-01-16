@@ -1,9 +1,10 @@
 # Author: louis
 # Threads: https://www.threads.com/@mr.__.l
 """
-Bitget Adapter (Final Fixed Version)
+Bitget Adapter (Zeabur Final Version)
 ==============
-修正抽象類別缺失方法，解決無法啟動與倉位不同步問題
+修正抽象類別缺失方法：build_stream_url, keepalive_user_stream, set_leverage
+同時修正持倉同步與歸零問題
 """
 
 import json
@@ -33,8 +34,6 @@ logger = logging.getLogger("as_grid_max")
 # Bitget WebSocket URLs
 BITGET_WS_MAINNET = "wss://ws.bitget.com/v2/ws/private"
 BITGET_WS_PUBLIC_MAINNET = "wss://ws.bitget.com/v2/ws/public"
-
-# Bitget 心跳間隔 (30 秒)
 BITGET_PING_INTERVAL = 30
 
 class BitgetAdapter(ExchangeAdapter):
@@ -45,9 +44,14 @@ class BitgetAdapter(ExchangeAdapter):
         self._api_secret: str = ""
         self._password: str = ""
 
-    def get_exchange_name(self) -> str: return "bitget"
-    def get_display_name(self) -> str: return "Bitget"
-    def needs_rest_ticker(self) -> bool: return True
+    def get_exchange_name(self) -> str:
+        return "bitget"
+
+    def get_display_name(self) -> str:
+        return "Bitget"
+    
+    def needs_rest_ticker(self) -> bool:
+        return True
 
     def init_exchange(self, api_key: str, api_secret: str, testnet: bool = False, password: str = "") -> None:
         self._testnet = testnet
@@ -60,64 +64,73 @@ class BitgetAdapter(ExchangeAdapter):
             "password": password,
             "options": {"defaultType": "swap"}
         }
-        if testnet: options["sandbox"] = True
+        if testnet:
+            options["sandbox"] = True
         self.exchange = ccxt.bitget(options)
         self.exchange.options["defaultType"] = "swap"
         logger.info(f"[Bitget] 交易所初始化完成")
 
     def load_markets(self) -> None:
-        if not self.exchange: return
+        if not self.exchange:
+            raise RuntimeError("請先呼叫 init_exchange()")
         self.exchange.load_markets(reload=False)
         self._markets_loaded = True
 
     def get_precision(self, symbol: str) -> PrecisionInfo:
         import math
-        if not self._markets_loaded: self.load_markets()
+        if not self._markets_loaded:
+            self.load_markets()
         def _to_decimal_places(value):
-            if isinstance(value, float) and 0 < value < 1: return int(abs(math.log10(value)))
+            if isinstance(value, float) and value > 0 and value < 1:
+                return int(abs(math.log10(value)))
             return int(value) if value else 0
         try:
             market = self.exchange.market(symbol)
-            prec = market.get("precision", {})
-            lim = market.get("limits", {})
-            p_p = _to_decimal_places(prec.get("price", 4))
-            a_p = _to_decimal_places(prec.get("amount", 0))
-            return PrecisionInfo(p_p, a_p, float(lim.get("amount", {}).get("min", 0) or 0), 5.0, p_p, a_p)
-        except: return PrecisionInfo(4, 0, 1, 5.0, 4, 0)
+            precision = market.get("precision", {})
+            limits = market.get("limits", {})
+            p_prec = _to_decimal_places(precision.get("price", 4))
+            a_prec = _to_decimal_places(precision.get("amount", 0))
+            return PrecisionInfo(p_prec, a_prec, float(limits.get("amount", {}).get("min", 0) or 0), 5.0, p_prec, a_prec)
+        except:
+            return PrecisionInfo(4, 0, 1, 5.0, 4, 0)
 
     def convert_symbol_to_ccxt(self, raw_symbol: str) -> str:
         raw = raw_symbol.upper().replace("/", "").replace(":", "")
         for quote in ["USDC", "USDT"]:
-            if raw.endswith(quote): return f"{raw[:-len(quote)]}/{quote}:{quote}"
+            if raw.endswith(quote):
+                return f"{raw[:-len(quote)]}/{quote}:{quote}"
         return raw_symbol
 
     def convert_symbol_to_ws(self, raw_symbol: str) -> str:
-        if ":" in raw_symbol: raw_symbol = raw_symbol.split(":")[0]
+        if ":" in raw_symbol:
+            raw_symbol = raw_symbol.split(":")[0]
         return raw_symbol.replace("/", "").replace(":", "").upper()
 
     def fetch_balance(self) -> Dict[str, BalanceUpdate]:
-        res = {}
+        result = {}
         try:
-            bal = self.exchange.fetch_balance({"type": "swap"})
-            for cur in ["USDC", "USDT"]:
-                if cur in bal:
-                    res[cur] = BalanceUpdate(cur, float(bal[cur].get("total", 0)), float(bal[cur].get("free", 0)))
-        except: pass
-        return res
+            balance = self.exchange.fetch_balance({"type": "swap"})
+            for currency in ["USDC", "USDT"]:
+                if currency in balance:
+                    info = balance[currency]
+                    result[currency] = BalanceUpdate(currency, float(info.get("total", 0) or 0), float(info.get("free", 0) or 0))
+        except:
+            pass
+        return result
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # 核心修正：持倉同步邏輯
+    # 修正持倉獲取：確保 0 倉位也能正確回傳，解決歸零問題
     # ═══════════════════════════════════════════════════════════════════════════
     def fetch_positions(self) -> List[PositionUpdate]:
         result = []
         try:
             positions = self.exchange.fetch_positions()
-            if not positions: return []
             for pos in positions:
                 contracts = float(pos.get("contracts", 0) or pos.get("size", 0) or 0)
-                # 這裡絕不 continue，0 也要回報
+                # 即使 contracts == 0 也繼續執行，確保主程式能看到歸零
                 side = pos.get("side", "").upper()
-                if side not in ["LONG", "SHORT"]: continue
+                if side not in ["LONG", "SHORT"]:
+                    continue
                 result.append(PositionUpdate(
                     symbol=pos.get("symbol", ""),
                     position_side=side,
@@ -131,11 +144,12 @@ class BitgetAdapter(ExchangeAdapter):
         return result
 
     def set_leverage(self, symbol: str, leverage: int) -> bool:
-        """補齊缺失方法"""
+        """實作父類別要求的 set_leverage"""
         try:
             self.exchange.set_leverage(leverage, symbol)
             return True
-        except: return False
+        except:
+            return False
 
     def create_limit_order(self, symbol: str, side: str, amount: float, price: float, position_side: str = "BOTH", reduce_only: bool = False) -> Dict:
         params = {'hedged': True}
@@ -152,43 +166,58 @@ class BitgetAdapter(ExchangeAdapter):
         return self.exchange.create_order(symbol, "market", side.lower(), amount, None, params)
 
     def cancel_order(self, order_id: str, symbol: str) -> bool:
-        try: self.exchange.cancel_order(order_id, symbol); return True
-        except: return False
+        try:
+            self.exchange.cancel_order(order_id, symbol)
+            return True
+        except:
+            return False
 
     def fetch_open_orders(self, symbol: Optional[str] = None) -> List[Dict]:
-        try: return self.exchange.fetch_open_orders(symbol)
-        except: return []
+        try:
+            return self.exchange.fetch_open_orders(symbol)
+        except:
+            return []
 
     def fetch_funding_rate(self, symbol: str) -> float:
-        try: return float(self.exchange.fetch_funding_rate(symbol).get("fundingRate", 0))
-        except: return 0.0
+        try:
+            funding = self.exchange.fetch_funding_rate(symbol)
+            return float(funding.get("fundingRate", 0) or 0)
+        except:
+            return 0.0
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # WebSocket 補齊缺失方法
+    # WebSocket 實作缺失方法
     # ═══════════════════════════════════════════════════════════════════════════
-    def get_websocket_url(self) -> str: return BITGET_WS_MAINNET
-    def get_public_websocket_url(self) -> str: return BITGET_WS_PUBLIC_MAINNET
+    def get_websocket_url(self) -> str:
+        return BITGET_WS_MAINNET
+
+    def get_public_websocket_url(self) -> str:
+        return BITGET_WS_PUBLIC_MAINNET
 
     def build_stream_url(self, symbols: List[str], user_stream_key: Optional[str] = None) -> str:
-        """補齊缺失方法"""
+        """實作父類別要求的 build_stream_url"""
         return self.get_websocket_url()
 
     async def start_user_stream(self) -> Optional[str]:
         if not self._api_key: return None
         ts = str(int(time.time()))
-        sign = base64.b64encode(hmac.new(self._api_secret.encode(), f"{ts}GET/user/verify".encode(), hashlib.sha256).digest()).decode()
-        return json.dumps({"op": "login", "args": [{"apiKey": self._api_key, "passphrase": self._password, "timestamp": ts, "sign": sign}]})
+        message = f"{ts}GET/user/verify"
+        signature = base64.b64encode(hmac.new(self._api_secret.encode(), message.encode(), hashlib.sha256).digest()).decode()
+        return json.dumps({"op": "login", "args": [{"apiKey": self._api_key, "passphrase": self._password, "timestamp": ts, "sign": signature}]})
 
     async def keepalive_user_stream(self) -> None:
-        """補齊缺失方法"""
+        """實作父類別要求的 keepalive_user_stream"""
         pass
 
-    def get_keepalive_interval(self) -> int: return BITGET_PING_INTERVAL
+    def get_keepalive_interval(self) -> int:
+        return BITGET_PING_INTERVAL
 
     def get_subscription_message(self, symbols: List[str]) -> str:
-        args = [{"instType": "USDT-FUTURES", "channel": "orders", "instId": "default"},
-                {"instType": "USDT-FUTURES", "channel": "positions", "instId": "default"},
-                {"instType": "USDT-FUTURES", "channel": "account", "coin": "default"}]
+        args = [
+            {"instType": "USDT-FUTURES", "channel": "orders", "instId": "default"},
+            {"instType": "USDT-FUTURES", "channel": "positions", "instId": "default"},
+            {"instType": "USDT-FUTURES", "channel": "account", "coin": "default"}
+        ]
         return json.dumps({"op": "subscribe", "args": args})
 
     def parse_ws_message(self, raw_message: str) -> Optional[WSMessage]:
@@ -207,7 +236,8 @@ class BitgetAdapter(ExchangeAdapter):
                 account = self._parse_account_data(payload)
                 if account: return WSMessage(WSMessageType.ACCOUNT_UPDATE, data=account)
             return None
-        except: return None
+        except:
+            return None
 
     def _parse_order_update(self, order_data: dict) -> Optional[OrderUpdate]:
         try:
@@ -229,7 +259,8 @@ class BitgetAdapter(ExchangeAdapter):
                 is_reduce_only=str(order_data.get("reduceOnly", "false")).lower() == "true",
                 timestamp=float(order_data.get("uTime", time.time()*1000))/1000,
             )
-        except: return None
+        except:
+            return None
 
     def _parse_position_update(self, positions: list) -> Optional[AccountUpdate]:
         try:
@@ -241,14 +272,16 @@ class BitgetAdapter(ExchangeAdapter):
                 if hold_side not in ["LONG", "SHORT"]: continue
                 result.append(PositionUpdate(self.convert_symbol_to_ccxt(raw), hold_side, abs(total), float(pos.get("avgPx", 0)), float(pos.get("upl", 0)), int(pos.get("lever", 1))))
             return AccountUpdate(result, [], time.time())
-        except: return None
+        except:
+            return None
 
     def _parse_account_data(self, account_data: list) -> Optional[AccountUpdate]:
         try:
             balances = []
             for acc in account_data:
-                coin = acc.get("coin", "").upper()
-                if coin in ["USDC", "USDT"]:
-                    balances.append(BalanceUpdate(coin, float(acc.get("equity", 0)), float(acc.get("available", 0))))
+                currency = acc.get("coin", "").upper()
+                if currency in ["USDC", "USDT"]:
+                    balances.append(BalanceUpdate(currency, float(acc.get("equity", 0)), float(acc.get("available", 0))))
             return AccountUpdate([], balances, time.time())
-        except: return None
+        except:
+            return None
