@@ -1,5 +1,12 @@
 # Author: louis
 # Threads: https://www.threads.com/@mr.__.l
+"""
+Bitget Adapter (Physical Sync & Anti-Deadlock Version)
+==============
+1. 強制對齊交易所實體數據，解決「啟動正確後又變錯」的問題。
+2. 當平倉報錯 22002 時，回傳假成功以強迫主程式清空本地快取記憶。
+3. 補齊所有主程式所需的抽象方法。
+"""
 
 import json
 import logging
@@ -8,10 +15,19 @@ import hmac
 import base64
 import hashlib
 from typing import Optional, Dict, List
+
 import ccxt
+
 from .base import (
-    ExchangeAdapter, TickerUpdate, OrderUpdate, PositionUpdate,
-    BalanceUpdate, AccountUpdate, PrecisionInfo, WSMessage, WSMessageType,
+    ExchangeAdapter,
+    TickerUpdate,
+    OrderUpdate,
+    PositionUpdate,
+    BalanceUpdate,
+    AccountUpdate,
+    PrecisionInfo,
+    WSMessage,
+    WSMessageType,
 )
 
 logger = logging.getLogger("as_grid_max")
@@ -20,9 +36,9 @@ class BitgetAdapter(ExchangeAdapter):
     def __init__(self):
         super().__init__()
         self._testnet = False
-        self._api_key = ""
-        self._api_secret = ""
-        self._password = ""
+        self._api_key: str = ""
+        self._api_secret: str = ""
+        self._password: str = ""
 
     def get_exchange_name(self) -> str: return "bitget"
     def get_display_name(self) -> str: return "Bitget"
@@ -33,22 +49,29 @@ class BitgetAdapter(ExchangeAdapter):
         self._api_key = api_key
         self._api_secret = api_secret
         self._password = password
-        opts = {"apiKey": api_key, "secret": api_secret, "password": password, "options": {"defaultType": "swap"}}
-        if testnet: opts["sandbox"] = True
-        self.exchange = ccxt.bitget(opts)
+        options = {
+            "apiKey": api_key,
+            "secret": api_secret,
+            "password": password,
+            "options": {"defaultType": "swap"}
+        }
+        if testnet: options["sandbox"] = True
+        self.exchange = ccxt.bitget(options)
         self.exchange.options["defaultType"] = "swap"
 
     def load_markets(self) -> None:
-        if self.exchange: self.exchange.load_markets(False); self._markets_loaded = True
+        if self.exchange:
+            self.exchange.load_markets(reload=False)
+            self._markets_loaded = True
 
     def get_precision(self, symbol: str) -> PrecisionInfo:
         import math
         if not self._markets_loaded: self.load_markets()
-        def _tp(v): return int(abs(math.log10(v))) if isinstance(v, float) and 0 < v < 1 else int(v) if v else 0
+        def _to_dp(v): return int(abs(math.log10(v))) if isinstance(v, float) and 0 < v < 1 else int(v) if v else 0
         try:
             m = self.exchange.market(symbol)
             p, l = m.get("precision", {}), m.get("limits", {})
-            pp, ap = _tp(p.get("price", 4)), _tp(p.get("amount", 0))
+            pp, ap = _to_dp(p.get("price", 4)), _to_dp(p.get("amount", 0))
             return PrecisionInfo(pp, ap, float(l.get("amount", {}).get("min", 0)), 5.0, pp, ap)
         except: return PrecisionInfo(4, 0, 1, 5.0, 4, 0)
 
@@ -71,32 +94,22 @@ class BitgetAdapter(ExchangeAdapter):
         return res
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # 核心修復：強制對齊交易所實體數據
+    # 強制物理同步邏輯
     # ═══════════════════════════════════════════════════════════════════════════
     def fetch_positions(self) -> List[PositionUpdate]:
         res = []
         try:
-            # 獲取 Bitget 實體帳戶的所有持倉
             ps = self.exchange.fetch_positions()
-            
-            # 如果交易所回傳空列表，代表實體帳戶已無任何持倉
-            if not ps:
-                logger.info("[Bitget] 偵測到交易所已無任何持倉，強制同步歸零。")
-                return []
-
+            if not ps: return []
             for p in ps:
                 qty = abs(float(p.get("contracts", 0) or p.get("size", 0) or 0))
-                # 只有真正有數量的倉位才加入清單，
-                # 這會強迫主程式刪除那些不在清單內（已平倉）的交易對記憶。
-                if qty > 0.0000001: 
+                if qty > 0.0000001:  # 只申報真正存在的持倉
                     res.append(PositionUpdate(
                         p.get("symbol", ""), p.get("side", "").upper(), qty,
                         float(p.get("entryPrice", 0)), float(p.get("unrealizedPnl", 0)), int(p.get("leverage", 1))
                     ))
             return res
-        except Exception as e:
-            logger.error(f"[Bitget] fetch_positions 同步異常: {e}")
-            return []
+        except: return []
 
     def set_leverage(self, symbol: str, leverage: int, params: dict = {}) -> bool:
         try: self.exchange.set_leverage(leverage, symbol, params); return True
@@ -107,11 +120,12 @@ class BitgetAdapter(ExchangeAdapter):
         if reduce_only: p['reduceOnly'] = True
         if position_side == "LONG": p["holdSide"] = "long"
         elif position_side == "SHORT": p["holdSide"] = "short"
-        # 增加錯誤捕捉，如果交易所報錯「無倉位」，則記錄並返回空字典防止主程式卡死
         try:
             return self.exchange.create_order(symbol, "limit", side.lower(), amount, price, p)
         except Exception as e:
-            if "22002" in str(e): logger.warning(f"[Bitget] 忽略無效平倉請求: {symbol}")
+            if "22002" in str(e): # 處理 Bitget "No position to close" 錯誤
+                logger.warning(f"[Bitget] 偵測到重複平倉請求 {symbol}，強制執行記憶歸零同步。")
+                return {"id": "sync_fake_id", "status": "closed", "lastUpdateTimestamp": time.time()}
             raise e
 
     def create_market_order(self, symbol: str, side: str, amount: float, position_side: str = "BOTH", reduce_only: bool = False) -> Dict:
@@ -122,7 +136,9 @@ class BitgetAdapter(ExchangeAdapter):
         try:
             return self.exchange.create_order(symbol, "market", side.lower(), amount, None, p)
         except Exception as e:
-            if "22002" in str(e): logger.warning(f"[Bitget] 忽略無效平倉請求: {symbol}")
+            if "22002" in str(e):
+                logger.warning(f"[Bitget] 偵測到重複平倉請求 {symbol}，強制執行記憶歸零同步。")
+                return {"id": "sync_fake_id", "status": "closed", "lastUpdateTimestamp": time.time()}
             raise e
 
     def cancel_order(self, order_id: str, symbol: str) -> bool:
