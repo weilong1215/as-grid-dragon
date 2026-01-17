@@ -1,12 +1,5 @@
 # Author: louis
 # Threads: https://www.threads.com/@mr.__.l
-"""
-Bitget Adapter (Final Robust Version)
-==============
-1. 補齊所有抽象方法，解決 "Can't instantiate abstract class" 錯誤。
-2. 針對 22002 錯誤進行攔截，強迫主程式更新本地數據，解決 BEAT/ALLO 記憶死鎖。
-3. 強化 fetch_positions，確保交易所實體持倉優先於本地快取。
-"""
 
 import json
 import logging
@@ -18,15 +11,8 @@ from typing import Optional, Dict, List
 import ccxt
 
 from .base import (
-    ExchangeAdapter,
-    TickerUpdate,
-    OrderUpdate,
-    PositionUpdate,
-    BalanceUpdate,
-    AccountUpdate,
-    PrecisionInfo,
-    WSMessage,
-    WSMessageType,
+    ExchangeAdapter, TickerUpdate, OrderUpdate, PositionUpdate,
+    BalanceUpdate, AccountUpdate, PrecisionInfo, WSMessage, WSMessageType,
 )
 
 logger = logging.getLogger("as_grid_max")
@@ -48,29 +34,22 @@ class BitgetAdapter(ExchangeAdapter):
         self._api_key = api_key
         self._api_secret = api_secret
         self._password = password
-        options = {
-            "apiKey": api_key,
-            "secret": api_secret,
-            "password": password,
-            "options": {"defaultType": "swap"}
-        }
-        if testnet: options["sandbox"] = True
-        self.exchange = ccxt.bitget(options)
+        opts = {"apiKey": api_key, "secret": api_secret, "password": password, "options": {"defaultType": "swap"}}
+        if testnet: opts["sandbox"] = True
+        self.exchange = ccxt.bitget(opts)
         self.exchange.options["defaultType"] = "swap"
 
     def load_markets(self) -> None:
-        if self.exchange:
-            self.exchange.load_markets(reload=False)
-            self._markets_loaded = True
+        if self.exchange: self.exchange.load_markets(reload=False); self._markets_loaded = True
 
     def get_precision(self, symbol: str) -> PrecisionInfo:
         import math
         if not self._markets_loaded: self.load_markets()
-        def _to_dp(v): return int(abs(math.log10(v))) if isinstance(v, float) and 0 < v < 1 else int(v) if v else 0
+        def _dp(v): return int(abs(math.log10(v))) if isinstance(v, float) and 0 < v < 1 else int(v) if v else 0
         try:
             m = self.exchange.market(symbol)
             p, l = m.get("precision", {}), m.get("limits", {})
-            pp, ap = _to_dp(p.get("price", 4)), _to_dp(p.get("amount", 0))
+            pp, ap = _dp(p.get("price", 4)), _dp(p.get("amount", 0))
             return PrecisionInfo(pp, ap, float(l.get("amount", {}).get("min", 0)), 5.0, pp, ap)
         except: return PrecisionInfo(4, 0, 1, 5.0, 4, 0)
 
@@ -93,13 +72,14 @@ class BitgetAdapter(ExchangeAdapter):
         return res
 
     def fetch_positions(self) -> List[PositionUpdate]:
-        """強制同步：只申報交易所真正存在的持倉"""
+        """強制與交易所實體持倉對齊"""
         res = []
         try:
             ps = self.exchange.fetch_positions()
             if not ps: return []
             for p in ps:
                 qty = abs(float(p.get("contracts", 0) or p.get("size", 0) or 0))
+                # 關鍵：只有交易所真的有貨，才申報給主程式
                 if qty > 0.000001:
                     res.append(PositionUpdate(
                         p.get("symbol", ""), p.get("side", "").upper(), qty,
@@ -109,7 +89,6 @@ class BitgetAdapter(ExchangeAdapter):
         except: return []
 
     def set_leverage(self, symbol: str, leverage: int, params: dict = {}) -> bool:
-        """補齊抽象方法：設定槓桿"""
         try: self.exchange.set_leverage(leverage, symbol, params); return True
         except: return False
 
@@ -121,8 +100,10 @@ class BitgetAdapter(ExchangeAdapter):
         try:
             return self.exchange.create_order(symbol, "limit", side.lower(), amount, price, p)
         except Exception as e:
-            if "22002" in str(e): # 處理無倉位可平的錯誤，強制同步
-                return {"id": "fake_sync", "status": "closed"}
+            # 💡 核心邏輯：如果交易所說沒倉位，就騙主程式說『平倉已完成』
+            if "22002" in str(e):
+                logger.warning(f"[強制同步] {symbol} 交易所已無持倉，正在強迫主程式歸零記憶...")
+                return {"id": "sync-" + str(int(time.time())), "status": "closed", "filled": amount, "remaining": 0}
             raise e
 
     def create_market_order(self, symbol: str, side: str, amount: float, position_side: str = "BOTH", reduce_only: bool = False) -> Dict:
@@ -134,7 +115,8 @@ class BitgetAdapter(ExchangeAdapter):
             return self.exchange.create_order(symbol, "market", side.lower(), amount, None, p)
         except Exception as e:
             if "22002" in str(e):
-                return {"id": "fake_sync", "status": "closed"}
+                logger.warning(f"[強制同步] {symbol} 交易所已無持倉，正在強迫主程式歸零記憶...")
+                return {"id": "sync-" + str(int(time.time())), "status": "closed", "filled": amount, "remaining": 0}
             raise e
 
     def cancel_order(self, order_id: str, symbol: str) -> bool:
@@ -151,15 +133,8 @@ class BitgetAdapter(ExchangeAdapter):
 
     def get_websocket_url(self) -> str: return "wss://ws.bitget.com/v2/ws/private"
     def get_public_websocket_url(self) -> str: return "wss://ws.bitget.com/v2/ws/public"
-    
-    def build_stream_url(self, symbols: List[str], user_stream_key: Optional[str] = None) -> str:
-        """補齊抽象方法"""
-        return self.get_websocket_url()
-
-    async def keepalive_user_stream(self) -> None:
-        """補齊抽象方法"""
-        pass
-
+    def build_stream_url(self, symbols: List[str], user_stream_key: Optional[str] = None) -> str: return self.get_websocket_url()
+    async def keepalive_user_stream(self) -> None: pass
     def get_keepalive_interval(self) -> int: return 30
 
     async def start_user_stream(self) -> Optional[str]:
