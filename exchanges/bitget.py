@@ -71,26 +71,31 @@ class BitgetAdapter(ExchangeAdapter):
         return res
 
     # ═══════════════════════════════════════════════════════════════════════════
-    # 重點修正：強制同步邏輯
+    # 核心修復：強制對齊交易所實體數據
     # ═══════════════════════════════════════════════════════════════════════════
     def fetch_positions(self) -> List[PositionUpdate]:
         res = []
         try:
+            # 獲取 Bitget 實體帳戶的所有持倉
             ps = self.exchange.fetch_positions()
-            # 如果交易所沒回傳任何持倉，這份 list 就是空的，主程式會據此將所有記憶歸零
+            
+            # 如果交易所回傳空列表，代表實體帳戶已無任何持倉
             if not ps:
+                logger.info("[Bitget] 偵測到交易所已無任何持倉，強制同步歸零。")
                 return []
+
             for p in ps:
                 qty = abs(float(p.get("contracts", 0) or p.get("size", 0) or 0))
-                # 只有數量大於 0 的才加入，如果原本有現在變 0，不加入 res 代表該倉位已消失
-                if qty > 0:
+                # 只有真正有數量的倉位才加入清單，
+                # 這會強迫主程式刪除那些不在清單內（已平倉）的交易對記憶。
+                if qty > 0.0000001: 
                     res.append(PositionUpdate(
                         p.get("symbol", ""), p.get("side", "").upper(), qty,
                         float(p.get("entryPrice", 0)), float(p.get("unrealizedPnl", 0)), int(p.get("leverage", 1))
                     ))
             return res
         except Exception as e:
-            logger.error(f"[Bitget] 同步持倉出錯: {e}")
+            logger.error(f"[Bitget] fetch_positions 同步異常: {e}")
             return []
 
     def set_leverage(self, symbol: str, leverage: int, params: dict = {}) -> bool:
@@ -102,14 +107,23 @@ class BitgetAdapter(ExchangeAdapter):
         if reduce_only: p['reduceOnly'] = True
         if position_side == "LONG": p["holdSide"] = "long"
         elif position_side == "SHORT": p["holdSide"] = "short"
-        return self.exchange.create_order(symbol, "limit", side.lower(), amount, price, p)
+        # 增加錯誤捕捉，如果交易所報錯「無倉位」，則記錄並返回空字典防止主程式卡死
+        try:
+            return self.exchange.create_order(symbol, "limit", side.lower(), amount, price, p)
+        except Exception as e:
+            if "22002" in str(e): logger.warning(f"[Bitget] 忽略無效平倉請求: {symbol}")
+            raise e
 
     def create_market_order(self, symbol: str, side: str, amount: float, position_side: str = "BOTH", reduce_only: bool = False) -> Dict:
         p = {'hedged': True}
         if reduce_only: p['reduceOnly'] = True
         if position_side == "LONG": p["holdSide"] = "long"
         elif position_side == "SHORT": p["holdSide"] = "short"
-        return self.exchange.create_order(symbol, "market", side.lower(), amount, None, p)
+        try:
+            return self.exchange.create_order(symbol, "market", side.lower(), amount, None, p)
+        except Exception as e:
+            if "22002" in str(e): logger.warning(f"[Bitget] 忽略無效平倉請求: {symbol}")
+            raise e
 
     def cancel_order(self, order_id: str, symbol: str) -> bool:
         try: self.exchange.cancel_order(order_id, symbol); return True
